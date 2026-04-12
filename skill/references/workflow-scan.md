@@ -12,6 +12,14 @@
 - **主 agent（你）**：调度 sub-agent、处理汇报、更新跨文件页面（modules/concepts/algorithm/architecture/refactor）、维护 log.json 和 index.md。
 - **sub-agent**：读源码、生成 files 页、返回 JSON 汇报。按语言分为 Python/C++/Generic 三种。
 
+## 初始化检测
+
+进入主循环前，先检查仓库是否已完成初始化：
+
+1. 检查 `.code-wiki/state.json` 是否存在
+   - **不存在** → 仓库尚未初始化。读取 `references/workflow-init.md`，完整走完初始化流程（浅层概览 → 用户确认范围 → 搭建骨架 → 展示计划），初始化完成后自动回到本流程继续执行主循环。
+   - **存在** → 直接进入主循环。
+
 ## 主循环一览
 
 ```
@@ -196,26 +204,6 @@ algorithm 页重点是**"怎么一步步从输入变成输出"**——输入输�
 
 每一条 refactor 条目必须注明来源文件和大致行号。
 
-## 定向扫描
-
-上面的主循环默认按最浅文件夹优先处理所有待处理文件。如果只想分析特定目录或文件，可以在 `scan.py` 的子命令中加 `--folder` 或 `--file` 过滤：
-
-```bash
-# 只看 core/ 下的待处理文件
-python .code-wiki/scan.py plan --folder=core/
-
-# 只取 core/dag/ 下一个待处理文件
-python .code-wiki/scan.py next --folder=core/dag
-
-# 只处理特定文件
-python .code-wiki/scan.py next --file=core/dag/executor.py
-
-# 取 core/dag/ 文件夹下所有待处理文件
-python .code-wiki/scan.py next-folder --folder=core/dag
-```
-
-使用定向扫描时，主循环中的 `scan.py next-folder` 替换为 `scan.py next-folder --folder=<target>`（或 `--file=<path>`），其余流程不变。
-
 ## 每处理完一批 sub-agent 的检查清单
 
 **前置条件（不满足就不能 mark-done）：**
@@ -235,7 +223,7 @@ python .code-wiki/scan.py next-folder --folder=core/dag
 
 `scan.py` 是本 skill 自带的扫描器，位于 `.code-wiki/scan.py`。它**不读代码**（那是 sub-agent 的工作），它做的是：遍历仓库按扩展名和 `.gitignore` 筛出源码文件、计算哈希对比上次状态、输出待处理清单、维护 `.code-wiki/state.json`。
 
-所有子命令都支持 `--folder=<path>` 和 `--file=<path>` 过滤参数（定向扫描时使用）。
+scope 在初始化时通过 `scan.py init --folder=<path>` 或 `--file=<path>` 确定。详见 `workflow-init.md`。
 
 | 子命令 | 用途 |
 |--------|------|

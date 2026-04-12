@@ -23,21 +23,15 @@ allowed-tools:
 | 用户输入（示例） | 子命令 |
 |---|---|
 | `init`, `初始化`, `开始建 wiki`, `帮我分析这个仓库`, `理解这个代码仓库`, `梳理项目架构`, `给这个项目生成文档` | init |
+| `init core/`, `初始化 core/` | init --folder=core/ |
+| `init core/dag/executor.py` | init --file=core/dag/executor.py |
 | `scan`, `扫描`, `扫一下`, `继续扫`, `扫剩余文件`, `增量扫描` | scan |
 | `query`, `查询`, `问问`, `xxx 是怎么工作的`, `xxx 和 yyy 是什么关系` | query |
 | `lint`, `健康检查`, `检查 wiki`, `检查一下 wiki 的一致性`, `lint 一下` | lint |
 
 **歧义消解：** 如果没有提供子命令且无法判断意图，`wiki/` 目录不存在时默认走 `init`，已存在时默认走 `query`。
 
-### scan 参数提取
-
-`$ARGUMENTS` 中可包含 `--folder` 或 `--file` 参数来限定扫描范围：
-
-- `--folder=<path>` 或 `--folder <path>`：只扫描指定目录（含子目录）
-- `--file=<path>` 或 `--file <path>`：只扫描指定文件
-- 也支持自然语言形式：`扫描 core/` → `--folder=core/`，`扫一下 core/dag/executor.py` → `--file=core/dag/executor.py`
-
-提取规则：识别 `$ARGUMENTS` 中以 `/` 分隔的路径片段。如果路径片段看起来像文件（包含 `.` 和扩展名），映射为 `--file`；否则映射为 `--folder`。提取后传给所有 `scan.py` 子命令调用。
+**路径参数提取：** 如果 `$ARGUMENTS` 中包含以 `/` 分隔的路径片段，提取为 `--folder` 或 `--file` 参数。路径含 `.` 和扩展名映射为 `--file`，否则映射为 `--folder`。这些参数只用于 init 阶段，传给 `scan.py init`。
 
 确定子命令后，**必须先读取对应的 reference 文件再继续**：
 
