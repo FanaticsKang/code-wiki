@@ -2,25 +2,15 @@
 
 这是 skill 的主循环。初始化完成后，主 agent 负责调度 sub-agent 扫描文件，并汇总跨文件发现。
 
-## 定向扫描
+## 流程概述
 
-默认情况下 scan 会按最浅文件夹优先处理所有待处理文件。如果只想分析特定目录或文件，可以在调用 scan.py 时加 `--folder` 或 `--file` 过滤：
+扫描流程的目标是**逐文件处理整个仓库**，为每个源码文件生成 wiki 页面，同时提炼出跨文件的架构、概念和算法。
 
-```bash
-# 只看 core/ 下的待处理文件
-python .code-wiki/scan.py plan --folder=core/
+三方分工：
 
-# 只取 core/dag/ 下一个待处理文件
-python .code-wiki/scan.py next --folder=core/dag
-
-# 只处理特定文件
-python .code-wiki/scan.py next --file=core/dag/executor.py
-
-# 取 core/dag/ 文件夹下所有待处理文件
-python .code-wiki/scan.py next-folder --folder=core/dag
-```
-
-使用定向扫描时，主循环中的 `scan.py next-folder` 替换为 `scan.py next-folder --folder=<target>`（或 `--file=<path>`），其余流程不变。
+- **scan.py**：管理文件状态（哈希比对、待处理清单），不读代码。它告诉你"下一个该处理谁"以及"这个文件处理完了没"。
+- **主 agent（你）**：调度 sub-agent、处理汇报、更新跨文件页面（modules/concepts/algorithm/architecture/refactor）、维护 log.json 和 index.md。
+- **sub-agent**：读源码、生成 files 页、返回 JSON 汇报。按语言分为 Python/C++/Generic 三种。
 
 ## 主循环一览
 
@@ -206,6 +196,26 @@ algorithm 页重点是**"怎么一步步从输入变成输出"**——输入输�
 
 每一条 refactor 条目必须注明来源文件和大致行号。
 
+## 定向扫描
+
+上面的主循环默认按最浅文件夹优先处理所有待处理文件。如果只想分析特定目录或文件，可以在 `scan.py` 的子命令中加 `--folder` 或 `--file` 过滤：
+
+```bash
+# 只看 core/ 下的待处理文件
+python .code-wiki/scan.py plan --folder=core/
+
+# 只取 core/dag/ 下一个待处理文件
+python .code-wiki/scan.py next --folder=core/dag
+
+# 只处理特定文件
+python .code-wiki/scan.py next --file=core/dag/executor.py
+
+# 取 core/dag/ 文件夹下所有待处理文件
+python .code-wiki/scan.py next-folder --folder=core/dag
+```
+
+使用定向扫描时，主循环中的 `scan.py next-folder` 替换为 `scan.py next-folder --folder=<target>`（或 `--file=<path>`），其余流程不变。
+
 ## 每处理完一批 sub-agent 的检查清单
 
 **前置条件（不满足就不能 mark-done）：**
@@ -221,24 +231,29 @@ algorithm 页重点是**"怎么一步步从输入变成输出"**——输入输�
 - [ ] `wiki/index.md` 已登记新页面
 - [ ] `python .code-wiki/scan.py mark-done <path>` 已逐个执行
 
-## 工具箱
+## scan.py 速查
 
-主 agent 在处理跨文件更新时可用的工具：
+`scan.py` 是本 skill 自带的扫描器，位于 `.code-wiki/scan.py`。它**不读代码**（那是 sub-agent 的工作），它做的是：遍历仓库按扩展名和 `.gitignore` 筛出源码文件、计算哈希对比上次状态、输出待处理清单、维护 `.code-wiki/state.json`。
 
-- `grep -rn <pattern> <dir>` —— 全目录搜索，找引用关系
-- `rg <pattern>` —— ripgrep，比 grep 快
-- `python .code-wiki/scan.py status` —— 查看整体进度
-- `python .code-wiki/scan.py plan` —— 查看待处理清单
+所有子命令都支持 `--folder=<path>` 和 `--file=<path>` 过滤参数（定向扫描时使用）。
 
-## 扫描脚本
+| 子命令 | 用途 |
+|--------|------|
+| `init` | 首次初始化：创建 wiki 骨架，扫描全仓库生成待处理清单 |
+| `rescan` | 重新扫描仓库，和 state 对比，刷新清单 |
+| `plan` | 查看当前待处理清单（默认列出前 50 个） |
+| `next` | 拿下一个待处理文件 |
+| `next-folder` | 拿当前最浅文件夹下所有待处理文件 |
+| `mark-done <file>` | 标记一个文件处理完毕 |
+| `status` | 查看整体进度 |
 
-`scripts/scan.py` 是本 skill 带的扫描器。它不读代码（那是 sub-agent 的工作），它做的是：
+常用诊断命令：
 
-- 遍历仓库，按扩展名和 `.gitignore` 筛出源码文件
-- 计算每个文件的哈希，对比上次的状态，找出新增/修改/删除的文件
-- 输出一份"本次应处理清单"给你
-- 维护 `.code-wiki/state.json`
-
-你负责调度 sub-agent 处理这些文件。每处理完一个文件，调用一次 `scan.py mark-done <file>` 把状态更新进去。
+```bash
+python .code-wiki/scan.py status          # 查看整体进度
+python .code-wiki/scan.py plan            # 查看待处理清单
+grep -rn <pattern> <dir>                  # 全目录搜索，找引用关系
+rg <pattern>                              # ripgrep，比 grep 快
+```
 
 脚本的完整用法见脚本本身的 `--help`。
