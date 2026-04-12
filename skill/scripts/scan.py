@@ -296,7 +296,18 @@ def rescan(state: State, repo_root: Path, config: dict, folder: str | None = Non
             unchanged.append(rel)
 
     # 找出已经从仓库里删掉的文件
-    deleted = [p for p in list(state.files.keys()) if p not in seen]
+    # 当指定了 folder/file 过滤条件时，只在该范围内查找已删除文件，
+    # 避免误删其他范围（之前 init 调用注册）的文件
+    if folder is not None:
+        folder_stripped = folder.strip("/")
+        scope = {p for p in state.files.keys()
+                 if p.startswith(folder_stripped + "/") or p == folder_stripped}
+    elif file is not None:
+        file_stripped = file.strip("/")
+        scope = {file_stripped} if file_stripped in state.files else set()
+    else:
+        scope = set(state.files.keys())
+    deleted = [p for p in scope if p not in seen]
     for p in deleted:
         state.files.pop(p, None)
 
