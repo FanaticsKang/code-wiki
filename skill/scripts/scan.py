@@ -11,17 +11,13 @@ scan.py —— code-wiki skill 的仓库扫描器
   5. 提供 --next / --mark-done 等子命令，支持 LLM 按步骤推进
 
 用法示例：
-  python .code-wiki/scan.py init                 # 首次初始化，生成扫描清单
-  python .code-wiki/scan.py init --folder=core/  # 只扫描 core/ 目录
-  python .code-wiki/scan.py plan                 # 查看当前的待处理清单
-  python .code-wiki/scan.py plan --folder=core/  # 只看 core/ 下的待处理文件
-  python .code-wiki/scan.py next                 # 拿下一个待处理文件的路径
-  python .code-wiki/scan.py next --folder=core/  # 拿 core/ 下下一个待处理文件
-  python .code-wiki/scan.py next-folder          # 拿当前最浅文件夹下所有待处理文件
-  python .code-wiki/scan.py next-folder --folder=core/dag  # 拿 core/dag 下所有待处理文件
-  python .code-wiki/scan.py mark-done <file>     # 标记一个文件处理完毕
-  python .code-wiki/scan.py status               # 看整体进度
-  python .code-wiki/scan.py rescan               # 重新对比仓库和 state，刷新清单
+  python .code-wiki/scan.py init [--folder=core/]   # 首次初始化，生成扫描清单
+  python .code-wiki/scan.py plan                     # 查看当前的待处理清单
+  python .code-wiki/scan.py next-folder              # 拿当前最浅文件夹下所有待处理文件
+  python .code-wiki/scan.py mark-done <file>         # 标记一个文件处理完毕
+  python .code-wiki/scan.py mark-pending <file>      # 标回 pending，供重扫使用
+  python .code-wiki/scan.py status                   # 看整体进度
+  python .code-wiki/scan.py rescan                   # 重新对比仓库和 state，刷新清单
 
 所有路径都相对于仓库根目录（即脚本所在的 .code-wiki 的父目录）。
 """
@@ -389,18 +385,11 @@ def pending_list(state: State, folder: str | None = None, file: str | None = Non
 
 
 def cmd_plan(args, state: State, repo_root: Path, state_file: Path, config: dict) -> int:
-    folder = getattr(args, "folder", None)
-    file = getattr(args, "file", None)
-    pending = pending_list(state, folder=folder, file=file)
+    pending = pending_list(state)
     total = len(state.files)
     done = sum(1 for r in state.files.values() if r.status == "done")
     skipped = sum(1 for r in state.files.values() if r.status == "skipped")
-    filter_desc = ""
-    if folder:
-        filter_desc = f" (过滤: --folder={folder})"
-    elif file:
-        filter_desc = f" (过滤: --file={file})"
-    print(f"[plan] 总计 {total} 文件 | 已处理 {done} | 跳过 {skipped} | 待处理 {len(pending)}{filter_desc}")
+    print(f"[plan] 总计 {total} 文件 | 已处理 {done} | 跳过 {skipped} | 待处理 {len(pending)}")
     limit = args.limit or 50
     print(f"[plan] 下面列出前 {min(limit, len(pending))} 个待处理文件（按路径深度+字典序）:")
     for r in pending[:limit]:
@@ -411,24 +400,6 @@ def cmd_plan(args, state: State, repo_root: Path, state_file: Path, config: dict
     return 0
 
 
-def cmd_next(args, state: State, repo_root: Path, state_file: Path, config: dict) -> int:
-    folder = getattr(args, "folder", None)
-    file = getattr(args, "file", None)
-    pending = pending_list(state, folder=folder, file=file)
-    if not pending:
-        print("[next] 没有待处理文件了。所有文件都已处理或跳过。")
-        return 0
-    r = pending[0]
-    flag = "LARGE" if r.lines >= LARGE_FILE_LINES else "normal"
-    # 输出一行机器可读 + 几行人读信息
-    print(f"NEXT_FILE: {r.path}")
-    print(f"  size={r.size} lines={r.lines} flag={flag}")
-    print(f"  abs={repo_root / r.path}")
-    if r.lines >= LARGE_FILE_LINES:
-        print("  提示: 这是大文件，请按 SKILL.md 中的分批策略处理——先骨架扫描再分段细读。")
-    return 0
-
-
 def _parent_dir(path: str) -> str:
     """获取文件所在的目录路径（相对仓库根）。根目录文件返回空字符串。"""
     parts = path.rsplit("/", 1)
@@ -436,33 +407,17 @@ def _parent_dir(path: str) -> str:
 
 
 def cmd_next_folder(args, state: State, repo_root: Path, state_file: Path, config: dict) -> int:
-    """返回当前最浅文件夹下所有待处理文件，或指定 --folder / --file 时的匹配文件。"""
-    folder_filter = getattr(args, "folder", None)
-    file_filter = getattr(args, "file", None)
-    pending = pending_list(state, folder=folder_filter, file=file_filter)
+    """返回当前最浅文件夹下所有待处理文件。"""
+    pending = pending_list(state)
     if not pending:
-        filter_desc = ""
-        if folder_filter:
-            filter_desc = f" (--folder={folder_filter})"
-        elif file_filter:
-            filter_desc = f" (--file={file_filter})"
-        print(f"[next-folder] 没有匹配的待处理文件{filter_desc}。")
+        print("[next-folder] 没有待处理文件了。")
         return 0
 
-    # 如果指定了 --folder，直接使用该文件夹；否则自动检测最浅文件夹
-    if folder_filter:
-        folder = folder_filter.strip("/")
-    elif file_filter:
-        # --file 模式：按文件精确匹配，放在其父目录的上下文中
-        folder = _parent_dir(pending[0].path)
-    else:
-        folder = _parent_dir(pending[0].path)
+    # 自动检测最浅文件夹
+    folder = _parent_dir(pending[0].path)
 
     # 收集该文件夹下所有待处理文件
-    if folder_filter:
-        folder_files = pending
-    else:
-        folder_files = [r for r in pending if _parent_dir(r.path) == folder]
+    folder_files = [r for r in pending if _parent_dir(r.path) == folder]
 
     batch_size = config.get("batch_size", args.batch_size)
     batch = folder_files[:batch_size]
@@ -515,6 +470,27 @@ def cmd_mark_done(args, state: State, repo_root: Path, state_file: Path, config:
     return 0
 
 
+def cmd_mark_pending(args, state: State, repo_root: Path, state_file: Path, config: dict) -> int:
+    """将一个已处理文件标回 pending，供反思步骤重扫使用。"""
+    target = args.file.replace("\\", "/")
+    if os.path.isabs(target):
+        try:
+            target = str(Path(target).resolve().relative_to(repo_root)).replace("\\", "/")
+        except ValueError:
+            print(f"[mark-pending] 路径不在仓库内: {args.file}", file=sys.stderr)
+            return 2
+    rec = state.files.get(target)
+    if rec is None:
+        print(f"[mark-pending] 未知文件: {target}", file=sys.stderr)
+        return 2
+    old_status = rec.status
+    rec.status = "pending"
+    rec.last_scanned = ""
+    save_state(state, state_file)
+    print(f"[mark-pending] {target}: {old_status} -> pending")
+    return 0
+
+
 def cmd_status(args, state: State, repo_root: Path, state_file: Path, config: dict) -> int:
     total = len(state.files)
     done = sum(1 for r in state.files.values() if r.status == "done")
@@ -543,22 +519,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_plan = sub.add_parser("plan", help="查看当前待处理清单")
     p_plan.add_argument("--limit", type=int, default=50, help="最多列出多少条")
-    p_plan.add_argument("--folder", default=None, help="只列出指定目录下的待处理文件")
-    p_plan.add_argument("--file", default=None, help="只列出指定文件")
-
-    p_next = sub.add_parser("next", help="拿下一个待处理文件")
-    p_next.add_argument("--folder", default=None, help="只在指定目录下取下一个")
-    p_next.add_argument("--file", default=None, help="取指定的文件")
 
     p_nf = sub.add_parser("next-folder", help="拿当前最浅文件夹下所有待处理文件")
     p_nf.add_argument("--batch-size", type=int, default=10, help="每批最多返回多少个文件（默认 10，可被 config.json 覆盖）")
-    p_nf.add_argument("--folder", default=None, help="只取指定目录下的待处理文件")
-    p_nf.add_argument("--file", default=None, help="只取指定文件")
 
     p_md = sub.add_parser("mark-done", help="标记一个文件已处理完毕")
     p_md.add_argument("file", help="文件路径（相对仓库根或绝对路径）")
     p_md.add_argument("--skip", action="store_true", help="标记为 skipped 而不是 done")
     p_md.add_argument("--note", default="", help="附注（例如 '样板代码，极简页'）")
+
+    p_mp = sub.add_parser("mark-pending", help="将文件标回 pending，供反思步骤重扫使用")
+    p_mp.add_argument("file", help="文件路径（相对仓库根或绝对路径）")
 
     sub.add_parser("status", help="查看整体进度")
     return p
@@ -578,9 +549,9 @@ def main(argv: list[str] | None = None) -> int:
         "init": cmd_init,
         "rescan": cmd_rescan,
         "plan": cmd_plan,
-        "next": cmd_next,
         "next-folder": cmd_next_folder,
         "mark-done": cmd_mark_done,
+        "mark-pending": cmd_mark_pending,
         "status": cmd_status,
     }
     return dispatch[args.cmd](args, state, repo_root, state_file, config)

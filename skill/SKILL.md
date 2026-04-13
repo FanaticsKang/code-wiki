@@ -20,11 +20,10 @@ allowed-tools:
 
 从 `$ARGUMENTS` 中解析用户意图，映射到以下子命令：
 
-| 用户输入（示例） | 子命令 |
+| 用户输入(示例) | 子命令 |
 |---|---|
 | `init`, `初始化`, `开始建 wiki`, `帮我分析这个仓库`, `理解这个代码仓库`, `梳理项目架构`, `给这个项目生成文档` | init |
-| `init core/`, `初始化 core/` | init --folder=core/ |
-| `init core/dag/executor.py` | init --file=core/dag/executor.py |
+| `init <路径>`(如 `init core/` 或 `init core/dag/executor.py`) | init,附带 `--folder` 或 `--file`(详见下方) |
 | `scan`, `扫描`, `扫一下`, `继续扫`, `扫剩余文件`, `增量扫描` | scan |
 | `query`, `查询`, `问问`, `xxx 是怎么工作的`, `xxx 和 yyy 是什么关系` | query |
 | `lint`, `健康检查`, `检查 wiki`, `检查一下 wiki 的一致性`, `lint 一下` | lint |
