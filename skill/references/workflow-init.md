@@ -40,7 +40,13 @@ AskUserQuestion:
 
 ## 步骤 3：搭建 wiki 骨架
 
-运行脚本：
+先部署扫描脚本到工作目录：
+
+```bash
+mkdir -p .code-wiki && cp .claude/skills/code-wiki/scripts/scan.py .code-wiki/scan.py
+```
+
+然后运行初始化：
 
 ```bash
 python .code-wiki/scan.py init
@@ -85,7 +91,7 @@ python .code-wiki/scan.py plan
 
 ## 步骤 3.5：产出 hypothesis v1
 
-这是新增步骤。基于步骤 1 的浅层概览，产出第一版工作假设。模板和规则见 `references/hypothesis-guide.md`。
+基于步骤 1 的浅层概览，产出第一版工作假设。模板和规则见 `references/hypothesis-guide.md`。
 
 **关键**：此时你还没读过任何源码细节，hypothesis v1 应该是"粗糙但全局"的——不要假装你已经知道答案。置信度填 "low"，大部分核心抽象和数据流都标为猜测。
 
@@ -113,9 +119,7 @@ hypothesis version 的递增只发生在**扫描后的反思步骤**，用户反
 
 剩余文件仍然通过 `scan.py plan` 可查，但**不承诺阅读顺序**——顺序由 hypothesis 演化决定。
 
-得到用户确认后，进入扫描循环。
-
-**如果是被 scan 流程自动触发到此的**，确认后直接返回 scan 主循环继续执行。
+得到用户确认后，init 流程结束。提醒用户可以执行 `/code-wiki scan` 开始扫描。
 
 ## 常见陷阱
 
