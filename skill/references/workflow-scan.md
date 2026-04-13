@@ -52,6 +52,25 @@ repeat:
 until hypothesis 已收敛且 pending 文件只剩边角料 或 用户打断
 ```
 
+## 批次选择策略：两阶段
+
+主循环的步骤 1 "决定本批读哪些文件"分两阶段，由 hypothesis 的 confidence 决定：
+
+**阶段 A：假设驱动阶段**（hypothesis.md 的 confidence 为 low 或 medium）
+
+主 agent **自由选文件**，忽略 scan.py next-folder 的顺序。选择标准：
+- 优先读 hypothesis.md "本轮将重点验证" 列出的文件
+- 其次读入口、核心抽象的定义、被 contradicts 频繁指向的模块
+- 一批 3-8 个文件，跨目录没关系，重要的是"能最大压缩 hypothesis 不确定性"
+
+这一阶段**不走 scan.py next-folder**，直接读 state.json 里的 pending 列表，按 hypothesis 选。选完后手动调 `scan.py mark-reserving <file1> <file2> ...`（如果 scan.py 不支持，退而求其次：每派发一个文件，完成后直接 mark-done）。
+
+**阶段 B：系统性填充阶段**（hypothesis.md 的 confidence 为 high 且连续 2 批扫描没触发实质修改）
+
+hypothesis 已收敛，剩下的多是胶水代码和边角料。此时回落到 `scan.py next-folder` 的文件夹级派发，走原有的按文件夹并行批次，只是每个 sub-agent 拿到的 hypothesis 仍然是完整的（它们读起来会很快，因为大多数文件只是填充）。
+
+**阶段切换的判断**：每次反思步骤的步骤 8 写 log 时，记一条 `stage: A` 或 `stage: B`。如果连续 2 次反思都认为 hypothesis 已收敛，下一批切到 B。
+
 **每完成一个文件夹的所有文件后，做一次简短汇报**（不暂停，继续扫描）：这个文件夹里新建了哪些模块/概念页，architecture 有什么新认识，refactor 新增了几条。用户随时可以打断调整方向。
 
 ## Sub-agent 调度规则
@@ -246,21 +265,26 @@ algorithm 页重点是**"怎么一步步从输入变成输出"**——输入输�
 
 ## 每处理完一批 sub-agent 的检查清单
 
-**前置条件（不满足就不能进入反思步骤）：**
+**阶段 1：验证 sub-agent 产出**
 - [ ] 所有 sub-agent 的 `wiki/files/<映射>.md` 已存在（`ls` 验证）
-- [ ] 所有汇报 JSON 已收集完整
+- [ ] 所有汇报 JSON 已收集完整，`hypothesis_feedback` 字段齐全
+- [ ] 缺失文件已通过两级恢复策略处理
 
-**必须完成的反思步骤（见 reflection-checklist.md 的完整清单）：**
+**阶段 2：记录和状态更新（可以失败重来，不影响数据）**
+- [ ] 批量写入 log.json（sub-agent 汇报 JSON 作为记录）
+- [ ] 按汇报更新 modules/concepts/algorithm/architecture/refactor 页面
+- [ ] 更新 index.md
+- [ ] **执行 scan.py mark-done（逐个执行，此时本批文件的处理状态固化）**
+
+**阶段 3：反思（必须完整走，见 reflection-checklist.md）**
 - [ ] 步骤 1：收集 contradicts 信号
 - [ ] 步骤 2：收集 new_observations
 - [ ] 步骤 3：更新 hypothesis.md（含可能的整段重写）
 - [ ] 步骤 4：检查老页面一致性（含可能的整段重写）
 - [ ] 步骤 5：检查"预期但还没看到"
 - [ ] 步骤 6：更新 refactor.md（含老条目复查）
-- [ ] 步骤 7：决定下一批读什么
-- [ ] 步骤 8：log.json 写入反思记录
+- [ ] 步骤 7：决定下一批读什么（写入 hypothesis.md 的"本轮将重点验证"）
+- [ ] 步骤 8：log.json 写入反思记录（含 stage: A/B 标记）
 
-**最后：**
-- [ ] scan.py mark-done 逐个执行
-- [ ] index.md 已登记新页面
+**关键：阶段 3 不能跳**。如果阶段 3 发现某个文件被 sub-agent 严重误读需要重扫，执行 `scan.py mark-pending <path>` 把它标回 pending，下一批重新派发。
 

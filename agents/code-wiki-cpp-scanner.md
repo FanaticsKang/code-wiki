@@ -191,6 +191,13 @@ ls <output_dir>/<映射路径>.md
 
 `members` 数组必须覆盖文件中所有 class/struct/enum 和成员函数（含类外定义），方法名格式为 `def ClassName::method_name`。`reason` 字段控制在 50 字以内。
 
+**`hypothesis_feedback` 的硬约束**：
+
+- `confirms`、`contradicts`、`new_observations` 三个字段**必须都是数组**
+- 没有内容时填 `[]`，**不要用 null 或省略字段**
+- 每个数组元素是一条具体的观察，不是"无"或"N/A"这种占位字符串
+- 如果本文件确实和 hypothesis 无关（例如是个 config 文件、工具函数），三个都填 `[]` 是正常的
+
 ## C++ 特有的分析要点
 
 - **头文件/源文件分离**：理解 .h/.hpp 声明与 .cpp/.cc 实现的对应关系

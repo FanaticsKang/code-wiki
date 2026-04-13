@@ -130,6 +130,40 @@ _暂无_
 - confidence：根据"已确认"占比和"核心抽象"的平均置信度综合判断
 - 在 log.json 追加一条记录，描述本次 hypothesis 的关键变化（哪些被证实、哪些被推翻、新增哪些）
 
+## 收敛规则：避免 hypothesis.md 无限膨胀
+
+随着扫描推进，"已确认"和"已推翻"会不断累积。必须主动收敛，否则 hypothesis.md 会变成一份臃肿的历史档案，注入 sub-agent 时浪费 token。
+
+### "已确认"的迁移
+
+当一条"已确认"满足以下条件时，迁移到 architecture.md 并从 hypothesis.md 移除：
+
+- 置信度已达到 high
+- 该确认已稳定存在 2 批以上的反思未被触动
+- architecture.md 的对应位置已写入相应内容
+
+迁移不是简单 cut-paste——architecture.md 用的是成品文档语言，hypothesis.md 用的是"我 agent 的猜测"语言，迁移时要改写。
+
+### "已推翻"的归档
+
+"已推翻"只保留**最近 5-10 条**和**扫描早期的关键误判**（这些往往指向项目的反直觉设计，值得用户看）。超出部分归档到 log.json 的专门区域：
+
+追加到 log.json：
+```json
+{
+  "date": "<YYYY-MM-DD>",
+  "action": "hypothesis_archive",
+  "hypothesis_version": <N>,
+  "archived_disproofs": ["<条目 1>", "<条目 2>", ...]
+}
+```
+
+然后从 hypothesis.md 移除。
+
+### hypothesis.md 的目标大小
+
+理想情况下，任何时刻 hypothesis.md 都应该控制在 200 行以内。超过说明需要走收敛。每次反思步骤的步骤 8 结束时，顺手看一眼大小，超过就触发收敛。
+
 ## 注入规则：谁能看到 hypothesis.md
 
 hypothesis.md 是**整体感的载体**，必须注入到所有会做"提炼判断"的 prompt 里。

@@ -216,6 +216,13 @@ ls <output_dir>/<映射路径>.md
 
 `members` 数组必须覆盖文件中所有 class 和 def（含类方法），方法名格式为 `def ClassName.method_name`。`reason` 字段控制在 50 字以内。
 
+**`hypothesis_feedback` 的硬约束**：
+
+- `confirms`、`contradicts`、`new_observations` 三个字段**必须都是数组**
+- 没有内容时填 `[]`，**不要用 null 或省略字段**
+- 每个数组元素是一条具体的观察，不是"无"或"N/A"这种占位字符串
+- 如果本文件确实和 hypothesis 无关（例如是个 config 文件、工具函数），三个都填 `[]` 是正常的
+
 ## 硬约束
 
 1. **必须创建输出文件**。没有输出文件就不算完成。
