@@ -64,6 +64,7 @@ allowed-tools:
 │   ├── README.md        ← wiki 入口页，整体概览
 │   ├── index.md         ← 页面目录（内容导向）
 │   ├── log.json         ← 处理日志（JSON 数组，append-only）
+│   ├── hypothesis.md    ← agent 的工作假设（心智模型），每批扫描后更新
 │   ├── architecture.md  ← 架构总览 + 数据流
 │   ├── refactor.md      ← 重构建议清单（坏味道、耦合点等）
 │   ├── files/           ← 每个被扫描的源码文件对应一页
@@ -95,7 +96,7 @@ allowed-tools:
 整个 skill 有四种操作，对应四种用户意图：
 
 1. **init**（初始化）——第一次面对一个仓库：分析仓库概貌、和用户确认扫描范围、搭建 wiki 骨架、生成扫描清单。**不立刻开始扫描文件**，先让用户确认计划。
-2. **scan**（扫描）——用脚本逐文件处理。读一个文件、写/更新它的 files 页、同步影响到的 modules 和 concepts 页、追加日志。这是主力操作。
+2. **scan**（扫描）——**基于 hypothesis.md 驱动的分层阅读**。每批 sub-agent 完成后强制走反思步骤（见 `references/reflection-checklist.md`），更新 hypothesis、检查老页面一致性、决定下一批读什么。这是主力操作。
 3. **query**（查询）——用户针对已建好的 wiki 提问。优先读 `index.md` 和 `architecture.md` 定位，再读具体页面。好答案应该回填到 `concepts/` 或 `refactor.md`。
 4. **lint**（健康检查）——检查 wiki 内部的矛盾、过时内容、孤儿页、缺失的交叉引用、应该但还没建的概念页，并给出补扫建议。
 
@@ -104,6 +105,18 @@ allowed-tools:
 ## 语言约定
 
 **所有 wiki 产出一律使用中文**（简体）。代码标识符（类名、函数名、变量名、文件名、路径）保持原样不翻译。技术术语如果有公认的中文译法就用中文，否则保留英文（例如 "middleware"、"closure" 可以直接用）。注释引用代码中的英文注释时，可以原样引用再附一句中文解释。
+
+## 整体感原则：hypothesis 驱动
+
+这个 skill 的扫描不是线性文件遍历，而是**假设驱动的阅读**：
+
+1. init 阶段产出 hypothesis v1（对项目的粗糙但全局的猜测）
+2. 每批扫描由 hypothesis 决定"读哪些文件最能压缩不确定性"
+3. 每批扫描后走反思步骤，更新 hypothesis（可能整段重写核心抽象/数据流）
+4. sub-agent 读文件时会拿到当前 hypothesis 作为 preamble，带着假设去读，并在汇报里明确说"证实/推翻/新观察"
+5. 老页面在每次反思时被检查一致性，必要时整段重写（不是追加）
+
+详见 `references/hypothesis-guide.md` 和 `references/reflection-checklist.md`。
 
 ## 提炼原则：架构和数据流优先
 

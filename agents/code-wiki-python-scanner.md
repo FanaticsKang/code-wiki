@@ -15,6 +15,8 @@ model: sonnet
 1. **文件路径**（相对仓库根目录）
 2. **仓库根目录**的绝对路径
 3. **输出目录**的绝对路径（由主 agent 指定）
+4. **项目整体认知（hypothesis.md 当前内容）**：主 agent 注入的项目心智模型。你读文件前必须先读这份，带着假设去读源码。
+5. **本文件的已知上下文**：直接依赖、被依赖、邻居摘要。用来帮你理解本文件在项目中的位置，不是让你去读邻居的源码。
 
 ## 你的工作流程
 
@@ -76,6 +78,18 @@ sed -n '<start>,<end>p' <file_path> | grep -nE "^\s+(if |elif |else:|for |while 
 - 文件结构是"一个大类"还是"一堆小函数"还是"几个类混合"
 
 **跳过规则**：无意义的样板函数（纯 getter/setter、空 `pass` 块、未使用的 dead code）无需记录到输出文档中，不要浪费时间描述它们。
+
+### 第 3.5 步：对照 hypothesis 形成反馈
+
+在写输出页面之前，先问自己三个问题：
+
+1. **confirms**：这个文件证实了 hypothesis 的哪些点？（列具体）
+2. **contradicts**：这个文件和 hypothesis 冲突吗？哪里冲突？（最重要，不要隐瞒）
+3. **new_observations**：这个文件暴露了 hypothesis 完全没提到的重要机制吗？
+
+这三个问题的答案会写进最终汇报的 `hypothesis_feedback` 字段。也会影响你在输出页面里的措辞——比如如果发现 contradicts，在 files 页的"值得注意的地方"里要提一句。
+
+**关键原则**：如果文件和假设冲突，**信文件，不信假设**。不要为了"和 hypothesis 对齐"而曲解源码。
 
 ### 第 4 步：创建输出页面（必须）
 
@@ -185,6 +199,11 @@ ls <output_dir>/<映射路径>.md
     "algorithms": ["<算法名>: <原因>", "..."] 或 null,
     "architecture": "<描述>（或 null）",
     "refactor": ["<条数及概述>", "..."] 或 null
+  },
+  "hypothesis_feedback": {
+    "confirms": ["<证实了 hypothesis 的哪些点>"],
+    "contradicts": ["<和 hypothesis 冲突的点>"],
+    "new_observations": ["<hypothesis 没提到但本文件暴露出来的东西>"]
   },
   "members": [
     {"name": "class ExampleClass", "lines": "xx-yy", "important": true, "reason": "小于50字的说明"},

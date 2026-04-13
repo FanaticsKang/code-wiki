@@ -14,9 +14,9 @@
 
 ### 步骤
 
-**1. 先读 `index.md`**
+**1. 先读 `hypothesis.md` 和 `index.md`**
 
-不要一上来就 `grep` 源码。`index.md` 是 wiki 的目录，它告诉你有哪些页面可能相关。如果 wiki 已经有几十页了，先扫一遍索引再决定读哪几页，比乱 grep 源码快得多。
+先读 hypothesis.md——这告诉你当前对项目的整体认知，可以避免给出和心智模型冲突的回答。再读 index.md 定位相关页面。如果 wiki 已经有几十页了，先扫一遍索引再决定读哪几页，比乱 grep 源码快得多。
 
 **2. 读相关的 modules/concepts/architecture 页**
 
@@ -140,6 +140,14 @@ done > /tmp/existing_concepts.txt
 对比 `scan.py status` 的进度和 architecture.md 的成熟度声明（页面顶部的 `coverage` 字段）：
 - 如果扫描进度 > 70% 但 architecture 还写着"初步猜测"，说明你忘了更新它
 - 如果扫描进度还很低但 architecture 已经写得很满，说明你可能**过度推断**了，要回头审视
+
+#### 8. hypothesis 和已有页面的一致性
+
+- hypothesis.md 的"核心抽象"是否都在 concepts/ 或 modules/ 有对应详细页？
+- hypothesis.md 的"核心数据流"是否和 architecture.md 一致？
+- hypothesis.md 的"已确认"条目有没有还未迁移进 architecture.md 的？（扫描进度 > 70% 时，已确认的核心内容应该开始迁移）
+
+这一项不匹配往往意味着 agent 在之前的反思步骤中跳过了"检查老页面一致性"，是高价值的修补点。
 
 ### lint 报告模板
 

@@ -66,6 +66,7 @@ python .code-wiki/scan.py init --folder=src/core/
 - `wiki/log.json` — 处理日志
 - `wiki/architecture.md` — 架构总览（先写初步猜测，扫描过程中持续更新）
 - `wiki/refactor.md` — 重构清单（初始为空骨架）
+- `wiki/hypothesis.md` — 工作假设 v1（**必须创建**，模板见 references/hypothesis-guide.md）
 
 创建骨架文件时，把占位符替换为步骤 1 中获取的真实值（项目名、一句话介绍、初步判断等）。日期用 `date +%Y-%m-%d` 获取。
 
@@ -82,24 +83,29 @@ python .code-wiki/scan.py plan
 - 使用了 `--folder` 时，确认只包含指定目录下的文件
 - 没有意外包含 `wiki/`、`.code-wiki/`、`node_modules/` 等应排除的目录
 
-## 步骤 4：展示扫描计划
+## 步骤 3.5：产出 hypothesis v1
 
-向用户展示扫描计划：
+这是新增步骤。基于步骤 1 的浅层概览，产出第一版工作假设。模板和规则见 `references/hypothesis-guide.md`。
 
-```bash
-python .code-wiki/scan.py plan --limit 30
-```
+**关键**：此时你还没读过任何源码细节，hypothesis v1 应该是"粗糙但全局"的——不要假装你已经知道答案。置信度填 "low"，大部分核心抽象和数据流都标为猜测。
 
-`--limit 30` 限制只显示前 30 个文件，避免文件太多刷屏。
+重要："我还不确定的"和"我预期会看到但还没看到的"这两节要认真填——它们会决定第一批扫描读什么。
 
-把输出展示给用户，告诉他：
+产出 v1 后，展示给用户看，问一句："我目前是这样理解这个项目的，有没有明显误解？"用户的纠正会让 v1 质量大幅提升，比扫 10 个文件修正回来便宜得多。
 
-- 你打算按这个顺序扫（浅层优先，由 `scan.py` 的排序策略决定）
-- 输出中带 `[LARGE]` 标记的文件超过 800 行，会分批读（详情参见`scan.py`）
-- 每扫完一个文件你会做什么（更新 files/modules/concepts/architecture/refactor）
-- 是要你一口气扫到底，还是每 N 个停一次汇报
+## 步骤 4：展示首批阅读计划（不是整体扫描计划）
 
-**得到确认后**，进入扫描循环（见 `workflow-scan.md`）。**如果是被 scan 流程自动触发到此的，确认后直接返回 scan 主循环继续执行。**
+不再展示 `scan.py plan` 的全部文件列表（那是文件系统视角）。改为展示**基于 hypothesis v1 的首批阅读计划**：
+
+- 首批要读的 3-8 个文件（入口 + 最核心的抽象定义）
+- 每个文件要回答 hypothesis 里的哪个问题
+- 预计读完首批后，hypothesis 的置信度能提到哪种程度
+
+剩余文件仍然通过 `scan.py plan` 可查，但**不承诺阅读顺序**——顺序由 hypothesis 演化决定。
+
+得到用户确认后，进入扫描循环。
+
+**如果是被 scan 流程自动触发到此的**，确认后直接返回 scan 主循环继续执行。
 
 ## 常见陷阱
 

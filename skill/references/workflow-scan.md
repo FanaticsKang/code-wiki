@@ -24,23 +24,32 @@
 
 ```
 repeat:
-    1. scan.py next-folder              → 拿到一个文件夹下所有待处理文件
+    0. 确认 hypothesis.md 存在且是最新版，主 agent 上下文里已载入
+    1. 基于 hypothesis.md 决定本批读哪些文件（不再用 scan.py next-folder 机械排序）
+       - 首批：入口 + 核心抽象定义
+       - 后续批：能最大压缩 hypothesis 不确定性的文件
+       - 末期：填充细节的文件
+       - 最后：胶水/边角料（可以大批量、浅扫）
     2. 按扩展名分组，选择对应 sub-agent
-    3. 按批次并行派发 sub-agent（默认每批 3 个，用户可在 config.json 覆盖）
+    3. 派发 sub-agent，每个 prompt 中注入：
+       - 文件路径、仓库根目录、输出目录（同现有设计）
+       - ★ 当前 hypothesis.md 完整内容（新增）
+       - ★ 该文件已知的直接依赖/被依赖（从 import 提取，新增）
+       - ★ 邻居文件的一句话摘要（如果已扫过，新增）
     4. 等待当前批次所有 sub-agent 返回汇报
-    5. 收集所有汇报，统一处理：
+    5. 收集汇报，统一处理：
        a. 验证 files 页已创建
-       b. 从汇报中提取 log 记录，批量写入 log.json
-       c. 按汇报建议更新跨文件页面
-          - wiki/modules/<模块>.md         ← 多数情况需要
-          - wiki/concepts/<概念>.md        ← 只在引入新概念时
-          - wiki/algorithm/<算法>.md       ← 只在发现算法/流水线时
-          - wiki/architecture.md           ← 只在架构级发现时
-          - wiki/refactor.md               ← 只在发现问题时
+       b. 批量写入 log.json
+       c. 按汇报更新跨文件页面（modules/concepts/algorithm/architecture/refactor）
        d. 更新 index.md
-       e. scan.py mark-done <path>（逐个执行）
-    6. 文件夹级汇报
-until 无待处理 或 用户打断
+       e. scan.py mark-done
+    6. ★ 走完整的反思步骤（见 references/reflection-checklist.md）（新增，不可跳过）
+       - 处理 hypothesis_feedback.contradicts
+       - 更新 hypothesis.md（必要时整段重写核心抽象/数据流）
+       - 检查老页面一致性（必要时整段重写）
+       - 决定下一批读什么
+    7. 文件夹级汇报（简短，让用户知道进展）
+until hypothesis 已收敛且 pending 文件只剩边角料 或 用户打断
 ```
 
 **每完成一个文件夹的所有文件后，做一次简短汇报**（不暂停，继续扫描）：这个文件夹里新建了哪些模块/概念页，architecture 有什么新认识，refactor 新增了几条。用户随时可以打断调整方向。
@@ -62,6 +71,32 @@ until 无待处理 或 用户打断
 **批次大小**：默认每批 3 个 sub-agent 并行。可在 `.code-wiki/config.json` 的 `batch_size` 字段覆盖。如果文件夹文件数超过 batch_size，分多批处理，每批完成后再发下一批。
 
 **文件夹间串行**：一个文件夹的所有批次完成后，做文件夹级汇报，然后调用 `scan.py next-folder` 获取下一个文件夹。
+
+### 派发时必须注入的 preamble
+
+派发任何 sub-agent 前，主 agent 必须在 prompt 中嵌入以下 preamble（在任务说明之前）：
+
+```
+## 项目整体认知（来自 wiki/hypothesis.md v<N>）
+
+<完整粘贴 hypothesis.md 当前内容>
+
+## 本文件的已知上下文
+
+* 所属模块：<从路径推断>
+* 直接依赖（import/include）：<从源文件头部提取，给出路径>
+* 被本项目其他文件依赖：<如有，从已扫过的文件汇报里反查>
+* 邻居文件摘要（同目录已扫过的文件）：
+    * <file1>：<一句话>
+    * <file2>：<一句话>
+
+## 阅读期望
+
+根据 hypothesis，本文件预期在项目中扮演的角色：<主 agent 的猜测，1-2 句>
+请在汇报的 hypothesis_feedback 字段里明确回应：这个猜测对不对。
+```
+
+sub-agent 收到这份 preamble 后，带着全局视角去读单个文件，而不是冷启动。
 
 每个 sub-agent 的 prompt 必须包含：
 1. 文件路径（相对仓库根目录）
@@ -117,6 +152,11 @@ sub-agent 完成后会返回一份 JSON 汇报，格式如下：
     "algorithms": ["<算法名>: <原因>", "..."] 或 null,
     "architecture": "<描述> 或 null",
     "refactor": ["<条数及概述>", "..."] 或 null
+  },
+  "hypothesis_feedback": {
+    "confirms": ["<证实了 hypothesis 的哪些点>"],
+    "contradicts": ["<和 hypothesis 冲突的点>"],
+    "new_observations": ["<hypothesis 没提到但本文件暴露出来的东西>"]
   },
   "members": [ ... ]
 }
@@ -206,16 +246,21 @@ algorithm 页重点是**"怎么一步步从输入变成输出"**——输入输�
 
 ## 每处理完一批 sub-agent 的检查清单
 
-**前置条件（不满足就不能 mark-done）：**
-- [ ] `wiki/files/<映射>.md` 已存在（用 `ls` 验证）
+**前置条件（不满足就不能进入反思步骤）：**
+- [ ] 所有 sub-agent 的 `wiki/files/<映射>.md` 已存在（`ls` 验证）
+- [ ] 所有汇报 JSON 已收集完整
 
-**批次汇总检查：**
-- [ ] log.json 已批量写入（从汇报 JSON 中提取完整记录，一次性追加）
-- [ ] 汇报 `cross_file_updates.modules` 非 null 时，modules 页已更新
-- [ ] 汇报 `cross_file_updates.concepts` 非 null 时，concepts 页已处理
-- [ ] 汇报 `cross_file_updates.algorithms` 非 null 时，algorithm 页已更新
-- [ ] architecture.md 已更新（如适用）
-- [ ] refactor.md 已追加条目（如适用）
-- [ ] `wiki/index.md` 已登记新页面
-- [ ] `python .code-wiki/scan.py mark-done <path>` 已逐个执行
+**必须完成的反思步骤（见 reflection-checklist.md 的完整清单）：**
+- [ ] 步骤 1：收集 contradicts 信号
+- [ ] 步骤 2：收集 new_observations
+- [ ] 步骤 3：更新 hypothesis.md（含可能的整段重写）
+- [ ] 步骤 4：检查老页面一致性（含可能的整段重写）
+- [ ] 步骤 5：检查"预期但还没看到"
+- [ ] 步骤 6：更新 refactor.md（含老条目复查）
+- [ ] 步骤 7：决定下一批读什么
+- [ ] 步骤 8：log.json 写入反思记录
+
+**最后：**
+- [ ] scan.py mark-done 逐个执行
+- [ ] index.md 已登记新页面
 
