@@ -49,7 +49,7 @@ repeat:
        - 检查老页面一致性（必要时整段重写）
        - 决定下一批读什么
     7. 文件夹级汇报（简短，让用户知道进展）
-until hypothesis 已收敛且 pending 文件只剩边角料 或 用户打断
+until hypothesis 已收敛且 pending 文件只剩边角料（pending 文件全部为 test/config/doc/script 目录下的文件，或剩余 pending 数 < 5）或 用户打断
 ```
 
 ## 批次选择策略：两阶段
@@ -63,7 +63,7 @@ until hypothesis 已收敛且 pending 文件只剩边角料 或 用户打断
 - 其次读入口、核心抽象的定义、被 contradicts 频繁指向的模块
 - 一批 3-8 个文件，跨目录没关系，重要的是"能最大压缩 hypothesis 不确定性"
 
-这一阶段**不走 scan.py next-folder**，直接读 state.json 里的 pending 列表，按 hypothesis 选。选完后手动调 `scan.py mark-reserving <file1> <file2> ...`（如果 scan.py 不支持，退而求其次：每派发一个文件，完成后直接 mark-done）。
+这一阶段**不走 scan.py next-folder**，直接读 state.json 里的 pending 列表，按 hypothesis 选。选完后 `mark-done` 留到该批所有 sub-agent 返回并完成反思后统一执行。
 
 **阶段 B：系统性填充阶段**（hypothesis.md 的 confidence 为 high 且连续 2 批扫描没触发实质修改）
 
@@ -71,7 +71,9 @@ hypothesis 已收敛，剩下的多是胶水代码和边角料。此时回落到
 
 **阶段切换的判断**：每次反思步骤的步骤 8 写 log 时，记一条 `stage: A` 或 `stage: B`。如果连续 2 次反思都认为 hypothesis 已收敛，下一批切到 B。
 
-**每完成一个文件夹的所有文件后，做一次简短汇报**（不暂停，继续扫描）：这个文件夹里新建了哪些模块/概念页，architecture 有什么新认识，refactor 新增了几条。用户随时可以打断调整方向。
+**阶段 B 回退**：如果在阶段 B 中某批扫描的反思发现了 contradicts（与 hypothesis 冲突），立即回退到阶段 A（假设驱动阶段）。回退原因记录在反思 log 中。连续 2 次反思无 contradicts 后再尝试切回 B。
+
+**阶段性汇报**：阶段 A（跨目录批次）每批完成后做一次简短汇报，不按文件夹汇报。阶段 B（按文件夹）每完成一个文件夹的所有文件后做一次简短汇报。汇报内容：新建了哪些模块/概念页，architecture 有什么新认识，refactor 新增了几条。用户随时可以打断调整方向。
 
 ## Sub-agent 调度规则
 
@@ -93,7 +95,7 @@ hypothesis 已收敛，剩下的多是胶水代码和边角料。此时回落到
 
 ### 派发时必须注入的 preamble
 
-派发任何 sub-agent 前，主 agent 必须在 prompt 中嵌入以下 preamble（在任务说明之前）：
+派发任何 sub-agent 前，主 agent 必须在 prompt 中嵌入以下 preamble（在任务说明之前）。**所有 `<...>` 占位符必须替换为实际值，不允许透传字面量**：
 
 ```
 ## 项目整体认知（来自 wiki/hypothesis.md v<N>）
@@ -240,6 +242,19 @@ algorithm 页重点是**"怎么一步步从输入变成输出"**——输入输�
 **和 concepts 页的边界**：如果一个东西既是概念又是算法，主体写到 algorithm/，concepts/ 里只留 1-3 行的指针。不要两边都写详细版。
 
 **什么时候不要硬建 algorithm 页**：如果一个文件只是简单的 CRUD、字段映射、薄封装，**即使它是"业务核心"也不要建 algorithm 页**——因为没有算法可写。硬写出来的只会是对代码的复述，既稀释真正有算法的页面的价值，也浪费用户的注意力。**宁缺毋滥**。
+
+### algorithm DL 页（DL 仓库专属）
+
+DL 仓库（`wiki/README.md` frontmatter 中 `dl_repo: true`）在扫描模型和数据文件时，额外触发以下页面创建：
+
+| 条件 | 创建页面 |
+|------|---------|
+| 扫描了 `model/` 目录下的文件，且 `algorithm/模型拓扑.md` 尚未存在 | 创建 `algorithm/模型拓扑.md` |
+| 扫描了 `datasets/` / `datamodules/` / `transforms/` 目录下的文件，且 `algorithm/数据集.md` 尚未存在 | 创建 `algorithm/数据集.md` |
+| 上述两者都已创建，且 `algorithm/数据流.md` 尚未存在 | 创建 `algorithm/数据流.md` |
+| 扫描的模型文件中发现可独立描述的组件（如 Encoder、Decoder、Loss 类） | 创建 `<组件名>.md`，`category` 标为 `模型组件` |
+
+模板见 `page-templates.md` 的 DL 专属模板。DL 页面创建后同步更新 index.md 的 algorithm 区段。
 
 ### architecture.md（只在架构级发现时）
 

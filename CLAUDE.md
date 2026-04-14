@@ -19,8 +19,10 @@ code-wiki 是一个 Claude Code skill + agents 分发包，用于为任意代码
 python .code-wiki/scan.py init
 python .code-wiki/scan.py status
 python .code-wiki/scan.py plan
-python .code-wiki/scan.py next
+python .code-wiki/scan.py next-folder
 python .code-wiki/scan.py mark-done <file>
+python .code-wiki/scan.py mark-pending <file>
+python .code-wiki/scan.py rescan
 ```
 
 本仓库无构建、测试、lint 流程。

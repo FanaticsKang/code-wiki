@@ -450,6 +450,236 @@ last_updated: 2026-04-10
 
 **原则**：有多少内容写多少，不要为了结构完整而填水。但"输入→输出"和"核心步骤"两节**永远必须有**，这是 algorithm 页的最小信息量。
 
+### DL 仓库专属页面（algorithm/ 下）
+
+DL 仓库检测为 true 时，algorithm/ 下额外产出以下页面。前三个必建，组件页按需。
+
+触发条件：
+
+| 页面 | 触发条件 |
+|------|---------|
+| `模型拓扑.md` | DL 仓库 + 扫描过 ≥1 个模型定义文件 |
+| `数据流.md` | DL 仓库 + 扫描过 dataset.py + model 主文件 |
+| `数据集.md` | DL 仓库 + 扫描过 dataset.py |
+| `<组件名>.md` | 模型文件中含可独立描述的组件（Encoder/Decoder/Loss 等） |
+
+#### `算法：模型拓扑` 模板
+
+```markdown
+---
+type: algorithm
+name: 模型拓扑
+category: 模型架构
+files:
+  - model/modeling.py
+last_updated: YYYY-MM-DD
+---
+
+# 算法：模型拓扑
+
+## 一句话
+
+<总体架构风格，如"Encoder-Decoder Transformer">
+
+## 结构图
+
+```mermaid
+flowchart TB
+    Input[原始输入 [B,L,6]] --> Norm[归一化]
+    Norm --> Tokenize[Tokenizer [B,L,6]→[B,T,D]]
+    Tokenize --> Encoder[TransformerBlock ×6 [B,T,D]→[B,T,D]]
+    Encoder --> Decoder[CrossAttn+FFN [B,T,D]→[B,T,D]]
+    Decoder --> Head[Output Head [B,T,D]→[B,T,6]]
+    Head --> Denorm[反归一化]
+```
+
+## 层级展开
+
+| 层 | 类 | 输入形状 | 输出形状 | 参数量 | 配置 |
+|----|---|---------|---------|--------|------|
+| 归一化 | `Normalize` | `[B,L,6]` | `[B,L,6]` | 0 | 均值方差 |
+| Tokenizer | `LinearTokenizer` | `[B,L,6]` | `[B,T,256]` | 1.5K | T=64 |
+| Encoder ×6 | `TransformerBlock` | `[B,T,256]` | `[B,T,256]` | 3.1M×6 | heads=8 |
+| Output Head | `Linear` | `[B,T,256]` | `[B,T,6]` | 1.5K | |
+| 反归一化 | `Denormalize` | `[B,T,6]` | `[B,T,6]` | 0 | 训练集统计量 |
+
+**总参数量**：~22.3M
+
+## 残差连接 & 特殊路径
+
+- Encoder 每层残差：`x = x + attn(ln(x))`
+- skip connection 从 Tokenize 直连 Output Head（`modeling.py:89`）
+
+## 关联
+
+- [数据流](./数据流.md) · [数据集](./数据集.md) · [架构总览](../architecture.md)
+```
+
+#### `算法：数据流` 模板
+
+```markdown
+---
+type: algorithm
+name: 数据流
+category: 数据流水线
+files:
+  - data/dataset.py
+  - data/transforms.py
+  - model/modeling.py
+last_updated: YYYY-MM-DD
+---
+
+# 算法：数据流
+
+## 一句话
+
+从磁盘原始数据到最终预测输出的完整数据流转路径。
+
+## 全景流程
+
+```mermaid
+flowchart LR
+    subgraph 离线
+        Raw[原始数据] --> Prep[预处理脚本]
+        Prep --> Split[训练/验证集]
+    end
+    subgraph 训练循环
+        Split --> Load[DataLoader]
+        Load --> Aug[数据增强]
+        Aug --> Forward[模型前向]
+        Forward --> Loss[损失计算]
+    end
+    subgraph 推理
+        Forward --> Post[后处理]
+        Post --> Eval[评估指标]
+    end
+```
+
+## 磁盘 → DataLoader
+
+| 步骤 | 位置 | 输入 | 输出 | 备注 |
+|------|------|------|------|------|
+| 读取 | `dataset.py:__getitem__` | 文件路径 | `dict` | |
+| 筛选 | `dataset.py:25-30` | `dict` | `np.ndarray` | 提取关键字段 |
+| 增强 | `transforms.py` | `np.ndarray` | `np.ndarray` | random rotation |
+| Collate | `dataset.py:collate_fn` | list[dict] | `BatchTensor` | padding + mask |
+
+## DataLoader → 模型前向
+
+| 步骤 | 位置 | 输入形状 | 输出形状 |
+|------|------|---------|---------|
+| Embedding | `embedding.py:12` | `[B,T]` int | `[B,T,D]` |
+| Encoder | `encoder.py` | `[B,T,D]` | `[B,T,D]` |
+| Decoder | `decoder.py` | `[B,T,D]` | `[B,T,D]` |
+| Head | `head.py` | `[B,T,D]` | `[B,T,C]` |
+
+## 模型前向 → 评估
+
+| 步骤 | 位置 | 输入 | 输出 |
+|------|------|------|------|
+| 反归一化 | `postprocess.py:10` | 模型输出 | 物理单位 |
+| NMS | `postprocess.py:25` | 候选结果 | 去重结果 |
+| 评估 | `evaluate.py` | 预测+GT | 指标 |
+
+## 关联
+
+- [模型拓扑](./模型拓扑.md) · [数据集](./数据集.md)
+```
+
+#### `算法：数据集` 模板
+
+目标：回答"数据由哪些字段组成、形状是什么"。
+
+```markdown
+---
+type: algorithm
+name: 数据集
+category: 数据流水线
+files:
+  - data/dataset.py
+  - data/transforms.py
+last_updated: YYYY-MM-DD
+---
+
+# 算法：数据集
+
+## 一句话
+
+<核心特征，如"自车轨迹 + 高精地图 → 预测未来 6s 轨迹">
+
+## 数据格式
+
+<文件格式、存储方式，如"每个 sample 一个 .pkl，包含以下字段">
+
+### 原始数据字段
+
+| 字段 | 类型 | 形状 | 含义 |
+|------|------|------|------|
+| `agent_hist` | `float32` | `[N_agent, T_hist, 6]` | 周围 agent 历史轨迹：x, y, vx, vy, heading, type |
+| `map_lanes` | `float32` | `[N_lane, N_pts, 3]` | 车道线点序列：x, y, direction |
+| `goal` | `float32` | `[2]` | 目标终点 (x, y) |
+| `gt_future` | `float32` | `[T_future, 2]` | 未来真实轨迹 (x, y)，仅训练时有 |
+
+坐标系：<全局 / ego 车辆中心 / 其他>
+
+### 模型输入张量（DataLoader 输出）
+
+| 字段 | 类型 | 形状 | 含义 |
+|------|------|------|------|
+| `input_tokens` | `long` | `[B, T]` | 离散化后的输入 token 序列 |
+| `position_ids` | `long` | `[B, T]` | 位置编码索引 |
+| `attention_mask` | `bool` | `[B, T]` | padding mask，False=填充位 |
+| `labels` | `long` | `[B, T]` | 目标 token（shifted right） |
+
+## 关联
+
+- [数据流](./数据流.md) · [模型拓扑](./模型拓扑.md) · [dataset.py](../files/data__dataset.md)
+```
+
+#### DL 模型组件模板（按需）
+
+对可独立描述的组件（Encoder、Decoder、Loss 等），复用 algorithm 页模板，`category` 标为 `模型组件`：
+
+```markdown
+---
+type: algorithm
+name: TransformerDecoder
+category: 模型组件
+files:
+  - model/decoder.py
+entry_points:
+  - model/decoder.py:TransformerDecoder.forward
+last_updated: YYYY-MM-DD
+---
+
+# 算法：TransformerDecoder
+
+## 一句话
+
+接收 token 序列，多头自注意力 + FFN 输出解码后的 token。
+
+## 输入 → 输出
+
+- **输入**：`[B,T,D]` + optional mask `[B,T]`
+- **输出**：`[B,T,D]`
+
+## 核心步骤
+
+1. Multi-Head Attention (行 45-60) — 8 头, dim=64
+2. Add & Norm (行 62-65)
+3. FFN (行 68-80) — hidden=2048, GELU
+4. Add & Norm (行 82-85)
+
+## 坑
+
+- causal mask 防未来 token (行 45-48)
+- mask=None 时退化为普通 attention (推理模式)
+
+## 关联
+
+- [模型拓扑](./模型拓扑.md) · [decoder.py](../files/model__decoder.md)
+```
+
 ---
 
 ## 5. architecture.md 的结构
@@ -555,6 +785,50 @@ Client
 ## 尚未弄清楚的地方
 
 诚实记录当前 wiki 还没搞懂的东西。
+
+<!-- DL 仓库专属段落开始（非 DL 仓库删除此块） -->
+
+## 模型拓扑
+
+用 mermaid 画出模型的主要组件和连接关系（简化版，详细版见 algorithm/模型拓扑.md）。
+
+```mermaid
+flowchart TB
+    subgraph Encoder
+        E1[Backbone] --> E2[FPN]
+    end
+    subgraph Decoder
+        D1[Transformer] --> D2[MLP Head]
+    end
+    Input --> E1
+    E2 --> D1
+    D2 --> Output
+```
+
+## 训练阶段
+
+| 阶段 | 数据 | 损失函数 | 优化器 | 关键超参 | 备注 |
+|------|------|---------|--------|---------|------|
+| 预训练 | 轨迹数据 | L1 + 分类 | AdamW | lr=1e-4, bs=256 | 50 epochs |
+| 微调 | 下游数据 | L1 | AdamW | lr=5e-5 | 10 epochs |
+
+## 扩展点
+
+| 扩展点 | 位置 | 当前实现 | 替换方式 |
+|--------|------|---------|---------|
+| Backbone | `model/backbone.py` | ResNet-50 | 修改 `config.backbone` |
+| Loss | `model/loss.py` | L1 + CE | 继承 `BaseLoss` |
+
+## 复现命令
+
+```bash
+pip install -r requirements.txt
+python tools/prepare_data.py --config configs/data.yaml
+python train.py --config configs/train.yaml
+python inference.py --config configs/infer.yaml --checkpoint checkpoints/best.pt
+```
+
+<!-- DL 仓库专属段落结束 -->
 ```
 
 ---
@@ -633,6 +907,10 @@ Client
 | [订单总额计算](./algorithm/订单总额计算.md) | 关键计算 | 含税费和折扣的总额计算 | 2026-04-09 |
 | [搜索排序](./algorithm/搜索排序.md) | 业务算法 | BM25 + 业务因子加权 | 2026-04-08 |
 
+<!-- DL 仓库额外行：模型拓扑 | 模型架构 | ... | | -->
+<!-- DL 仓库额外行：数据流 | 数据流水线 | ... | | -->
+<!-- DL 仓库额外行：数据集 | 数据流水线 | ... | | -->
+
 ## 概念（concepts/）
 
 | 概念 | 类型 | 说明 | 最后更新 |
@@ -667,39 +945,50 @@ Client
 
 ## 8. log.json 的格式（严格）
 
-这是**唯一一个对格式有硬要求的文件**，因为脚本和 grep 会消费它。
+log.json 是 **JSON 数组**（`[]`），每条是一个 JSON 对象。脚本和 grep 会消费它，格式不能随意改动。
 
-```markdown
-# 处理日志
+合法的 `<action>`：`init` / `scan` / `query` / `lint` / `reflect` / `hypothesis_archive` / `batch` / `note`
 
-## [2026-04-10] init | myproject
-- 初始化 wiki 骨架
-- 扫描发现 42 个源码文件（其中 3 个 >= 800 行）
-- 扫描范围：src/
-- 重点：重构前的架构理解
-
-## [2026-04-10] scan | src/core/app.py
-- 新建 files/src__core__app.md
-- 更新 modules/core.md（定位为生命周期入口）
-- 架构图草稿已写入 architecture.md
-
-## [2026-04-10] scan | src/core/scheduler.py
-- 新建 files/src__core__scheduler.md
-- 更新 modules/core.md（新增调度器段）
-- 新建 algorithm/任务调度.md
-- 新建 concepts/任务.md（Task 数据结构）
-- refactor.md 追加 1 条（严重：_tick 全局锁）
-
-## [2026-04-10] query | "全局锁的影响范围？"
-- 读了 scheduler.py、executor.py、api/handlers.py
-- 回答已回填到 refactor.md 的相关条目（补了影响分析）
-
-## [2026-04-10] lint | round-1
-- 发现 2 个孤儿页
-- 发现 3 处未建的 concepts 页候选
-- 详见 wiki 对话历史
+```json
+[
+  {
+    "date": "2026-04-10",
+    "action": "init",
+    "target": "myproject",
+    "details": {
+      "total_files": 42,
+      "large_files": 3,
+      "scan_scope": "src/",
+      "focus": "重构前的架构理解"
+    }
+  },
+  {
+    "date": "2026-04-10",
+    "action": "scan",
+    "file": "src/core/app.py",
+    "files_page": "wiki/files/src__core__app.md",
+    "cross_file_updates": {
+      "modules": ["core: 定位为生命周期入口"],
+      "concepts": null,
+      "algorithms": null,
+      "architecture": "新增调度器工作流程",
+      "refactor": null
+    }
+  },
+  {
+    "date": "2026-04-10",
+    "action": "reflect",
+    "details": {
+      "hypothesis_version": 2,
+      "changes_summary": "证实了 Scheduler 是入口，推翻了 EventBus 假设",
+      "stage": "A"
+    }
+  },
+  {
+    "date": "2026-04-10",
+    "action": "query",
+    "question": "全局锁的影响范围？",
+    "result": "回填到 refactor.md 相关条目，补了影响分析"
+  }
+]
 ```
-
-每条日志的第一行必须匹配正则 `^## \[\d{4}-\d{2}-\d{2}\] \w+ \| .+$`。
-
-合法的 `<操作>`：`init` / `scan` / `query` / `lint` / `batch` / `note`

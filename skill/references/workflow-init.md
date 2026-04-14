@@ -19,6 +19,25 @@
 3. 入口文件可能是哪个？
 4. 有没有已有的架构文档？
 
+### DL 仓库检测（步骤 1：内存计算）
+
+在浅层概览中额外计算是否为深度学习训练仓库。检测规则见 SKILL.md（两级信号：必要信号 + 辅助信号），**执行时遵循"浅层概览"原则**：
+
+1. **必要信号检查**（浅层）：
+   - 检查依赖文件（`requirements.txt` / `pyproject.toml` / `setup.py` / `setup.cfg`）是否包含 DL 框架（torch / tensorflow / jax / transformers / accelerate 等）
+   - **如果依赖文件未提供明确信号**，可快速 grep 源码文件的前 10 行查找 import 语句（避免深入阅读代码）
+2. **辅助信号检查**（浅层）：
+   - 训练入口文件：存在 `train*.py` / `run*.py` / `pretrain*.py` / `finetune*.py` / `trainer*.py`（仅检查文件名，不读内容）
+   - 模型定义目录：存在 `model/` / `models/` / `network/` / `nets/` / `backbone/` / `arch/`（仅检查目录名，不读内部文件）
+   - 数据集模块：存在 `dataset*.py` / `datamodule*.py` / `dataloader*.py` / `data.py` / `collator*.py`（仅检查文件名）
+   - HuggingFace 生态：存在 `transformers` 等 import（通过 grep 前几行）
+
+**判定**：必要信号未命中 → `dl_repo = false`。必要信号命中 + 任意一条辅助信号命中 → `dl_repo = true`。
+
+**此时不写入文件**，将 `dl_repo` 布尔值保留在内存中，供步骤 3 使用。
+
+如果后续发现检测有误，用户可直接修改 `wiki/README.md` 的 `dl_repo` 字段，无需重新 init。
+
 ## 步骤 2：和用户确认扫描计划
 
 **如果用户已通过 `--folder`/`--file` 指定了范围**，跳过本步骤，直接用用户指定的范围。
@@ -76,6 +95,15 @@ python .code-wiki/scan.py init --folder=src/core/
 
 创建骨架文件时，把占位符替换为步骤 1 中获取的真实值（项目名、一句话介绍、初步判断等）。日期用 `date +%Y-%m-%d` 获取。
 
+**DL 仓库处理**：根据步骤 1 计算的内存 `dl_repo` 值：
+- 如果 `dl_repo` 为 `true`：
+  - `architecture.md` 使用增强版骨架（含模型拓扑、训练阶段、扩展点、复现命令的占位段落）
+  - `README.md` 的 frontmatter 中设置 `dl_repo: true`
+- 如果 `dl_repo` 为 `false`：
+  - `README.md` 的 frontmatter 中设置 `dl_repo: false`（非 DL 仓库标记）
+
+**这是首次将 `dl_repo` 写入磁盘**。后续所有 DL 分支逻辑都读这个 frontmatter 标志。
+
 ### 校验
 
 骨架创建完成后，运行 `scan.py plan` 确认文件清单符合预期：
@@ -96,6 +124,12 @@ python .code-wiki/scan.py plan
 **关键**：此时你还没读过任何源码细节，hypothesis v1 应该是"粗糙但全局"的——不要假装你已经知道答案。置信度填 "low"，大部分核心抽象和数据流都标为猜测。
 
 重要："我还不确定的"和"我预期会看到但还没看到的"这两节要认真填——它们会决定第一批扫描读什么。
+
+如果 DL 检测为 true，hypothesis v1 的"我还不确定的"中追加 DL 特有问题：
+- 模型的主干架构是什么？
+- 训练分几个阶段，每个阶段的损失函数是什么？
+- 数据从原始格式到模型输入经过哪些变换？
+- 有哪些预训练权重，如何加载？
 
 产出 v1 后，展示给用户看，问一句："我目前是这样理解这个项目的，有没有明显误解？"
 

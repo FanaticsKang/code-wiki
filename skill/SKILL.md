@@ -74,17 +74,38 @@ allowed-tools:
 │   │   └── <概念名>.md
 │   └── algorithm/       ← 动态过程：核心算法、数据处理流水线、关键计算逻辑
 │       └── <算法名>.md
+│                        ← [DL 仓库] 另有模型拓扑/数据流/数据集/组件等必建页面
 └── .code-wiki/          ← 脚本和状态
     ├── scan.py          ← 扫描器脚本
     └── state.json       ← 增量状态（文件哈希、最后处理时间）
 ```
+
+**DL 仓库检测**：init 阶段通过浅层概览判断是否为深度学习训练仓库。检测信号分两级：
+
+必要信号（必须命中）：
+- **DL 框架依赖**：依赖文件（`requirements.txt` / `pyproject.toml` / `setup.py` / `setup.cfg`）或源码 import 中出现 `torch` / `pytorch-lightning` / `lightning` / `tensorflow` / `keras` / `jax` / `flax` / `transformers` / `accelerate` / `peft`
+
+辅助信号（命中必要信号后，再命中任意一条即判定为 DL 仓库）：
+- 存在训练入口文件：`train*.py` / `run*.py` / `pretrain*.py` / `finetune*.py` / `trainer*.py`，且内容含 `fit` / `train` / `Trainer` 调用
+- 存在模型定义目录：`model/` / `models/` / `network/` / `nets/` / `backbone/` / `arch/`，且含继承 `nn.Module` / `LightningModule` / `keras.Model` 的类
+- 存在数据集模块：`dataset*.py` / `datamodule*.py` / `dataloader*.py` / `data.py` / `collator*.py`，且含继承 `Dataset` / `DataModule` / `IterableDataset` 的类
+- HuggingFace 生态：源码中 import 了 `transformers.Trainer` / `transformers.AutoModel*` / `from datasets import` / `trl`
+
+判定规则：**必要信号未命中 → 非 DL 仓库**（不管辅助信号命中几条）。必要信号命中 + 任意一条辅助信号命中 → DL 仓库。
+
+纠错：如果检测结果有误，直接修改 `wiki/README.md` frontmatter 中的 `dl_repo` 字段即可。后续 scan 和 query 都读这个字段。
+
+检测到 DL 仓库后，`architecture.md` 使用增强版模板，`algorithm/` 下额外产出模型拓扑、数据流、数据集三类必建页面。非 DL 仓库完全不受影响。
 
 四类页面的区别很重要，务必遵守：
 
 - **files/**：以"这个文件是做什么的"为中心。对于只做数据转换、胶水代码、样板代码的文件，**一小段甚至一句话就够了**，不要浪费篇幅。对于承载核心逻辑的文件，**提炼关键函数/类和它们的职责**，而不是抄代码。
 - **modules/**：以"这个模块对外承担什么职责"为中心。模块是用户理解项目的主要单位，这一层要写得扎实：对外接口、内部结构、和其他模块的关系、数据流入流出。
 - **concepts/**：**静态结构**。跨文件的领域实体、核心数据结构、术语定义、重要的设计模式。帮助用户"跳出文件看系统骨架"。
-- **algorithm/**：**动态过程**。核心算法（通用或业务特有）、数据处理流水线、关键计算逻辑。以"输入 X 经过什么步骤变成输出 Y"为中心，包含步骤、复杂度、关键不变量、边界条件、为什么这么设计。这是"核心处理"的归宿——凡是"有一定计算复杂度、值得把步骤写清楚"的逻辑都往这里放。
+- **algorithm/**：**动态过程**。核心算法（通用或业务特有）、数据处理流水线、关键计算逻辑。以"输入 X 经过什么步骤变成输出 Y"为中心，包含步骤、复杂度、关键不变量、边界条件、为什么这么设计。这是"核心处理"的归宿——凡是"有一定计算复杂度、值得把步骤写清楚"的逻辑都往这里放。DL 仓库中，algorithm/ 还承载模型架构文档：
+  - **通用页面**（所有仓库）`<算法名>.md`：排序、调度、状态机等
+  - **DL 必建页面**（DL 仓库专属）：`模型拓扑.md`（完整结构图 + 层级展开表）、`数据流.md`（端到端数据流转全景）、`数据集.md`（数据集字段、形状、格式）
+  - **DL 按需页面**：`<组件名>.md`，如 Encoder、Decoder、Loss 等可独立描述的模型组件
 
 **concepts/ 和 algorithm/ 的分工规则**：优先放 algorithm/。如果一个东西同时是概念又是算法（例如"任务调度"既是个领域术语也是一段有状态的处理逻辑），把主体写到 algorithm/，在 concepts/ 里只留一段 1-3 行的短指针指过去。不要两边都写详细版，会漂移。
 
