@@ -88,7 +88,9 @@ allowed-tools:
 
 **concepts/ 和 algorithm/ 的分工规则**：优先放 algorithm/。如果一个东西同时是概念又是算法（例如"任务调度"既是个领域术语也是一段有状态的处理逻辑），把主体写到 algorithm/，在 concepts/ 里只留一段 1-3 行的短指针指过去。不要两边都写详细版，会漂移。
 
-**什么时候不写 algorithm/ 页**：很多项目 80% 是 CRUD 胶水，没什么真正的算法。这种情况下 algorithm/ 目录空着就空着，不要硬凑——没有就是没有，这个信息本身对用户也有用。
+**什么时候不写 algorithm/ 页**："宁缺毋滥"只在确实没有的时候适用——典型的 CRUD/胶水项目可能整个 `algorithm/` 都空着是合理的。但当项目里出现复杂处理逻辑（状态机、并发模型、插值/采样、调度算法、复杂解析、数学计算等）时，必须建 algorithm 页。判断标准：如果你在 `architecture.md` 里给某个机制写了超过 5 行的解释，这个机制就值得一个独立的 algorithm 页（`architecture.md` 只放 1-2 行的指针指过去）。
+
+**modules 页不可省略**：modules 页是用户理解项目的主干路径，不能省略。规则：任何被扫描的、包含 ≥ 2 个有实质内容的源文件的目录，必须有对应的 modules 页。这条是硬约束，不受"宁缺毋滥"约束。
 
 ## 工作流总览
 
@@ -120,6 +122,10 @@ allowed-tools:
 ## 提炼原则：架构和数据流优先
 
 这个 skill 的一个核心定位是：**帮助用户理解结构复杂或缺乏文档的代码仓库**。
+
+### architecture.md 是目录式鸟瞰图，不是详解仓库
+
+`architecture.md` 的角色是目录式的鸟瞰图，不是详解仓库。每个章节最多 5-10 行，具体内容用链接指向 `modules/`、`concepts/`、`algorithm/` 页。如果 agent 发现自己在 `architecture.md` 里某个章节写了超过 10 行，必须把超出部分拆出去建独立页（modules/concepts/algorithm），`architecture.md` 里只留 1-2 行的指针指过去。
 
 ### 提炼架构和数据流，不是逐行解说
 
