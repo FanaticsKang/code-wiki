@@ -1,0 +1,29 @@
+# =============================================================================
+# 模块测试主索引
+# =============================================================================
+# 所有模块及其测试配置的主索引文件。
+#
+# 此文件由 module-test-gen 技能管理：
+#   - "init" 创建/更新此文件
+#   - "run" 在测试执行后添加报告路径
+#
+# source: manual — 工程师明确要求的模块
+# source: auto   — Claude 在仓库扫描中发现的模块
+# =============================================================================
+
+project: example-project
+
+modules:
+  - name: payment
+    config: test-config/modules/payment.yml
+    report: null                          # 由 "run" 命令填充
+    language: python
+    test_framework: pytest
+    source: manual
+
+  - name: auth
+    config: test-config/modules/auth.yml
+    report: null
+    language: python
+    test_framework: pytest
+    source: auto                          # Claude 发现的模块

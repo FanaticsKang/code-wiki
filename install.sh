@@ -1,13 +1,13 @@
 #!/bin/bash
 # code-wiki 安装脚本
-# 将 code-wiki skill 和 agents 安装到指定项目
+# 将 skills/ 下的所有 skill 和 agents/ 安装到指定项目
 #
 # 用法:
 #   ./install.sh <目标项目路径>
 #   ./install.sh /path/to/your/project
 #
 # 功能:
-#   - 复制 skill 文件到 <项目>/.claude/skills/code-wiki/
+#   - 复制 skills/ 下所有 skill 到 <项目>/.claude/skills/
 #   - 复制 agent 文件到 <项目>/.claude/agents/
 #   - 已存在的同名文件会被覆盖（会提示确认）
 
@@ -30,34 +30,40 @@ if [ ! -d "$TARGET_PROJECT" ]; then
 fi
 
 # ========== 定义路径 ==========
-SKILL_SRC="$SCRIPT_DIR/skill"
+SKILLS_SRC="$SCRIPT_DIR/skills"
 AGENTS_SRC="$SCRIPT_DIR/agents"
 
-SKILL_DST="$TARGET_PROJECT/.claude/skills/code-wiki"
+SKILLS_DST="$TARGET_PROJECT/.claude/skills"
 AGENTS_DST="$TARGET_PROJECT/.claude/agents"
 
 # ========== 检查源文件 ==========
-if [ ! -d "$SKILL_SRC" ] || [ ! -d "$AGENTS_SRC" ]; then
-    echo "错误: 找不到 skill 或 agents 目录，请确认脚本位于 code-wiki 仓库根目录"
+if [ ! -d "$SKILLS_SRC" ]; then
+    echo "错误: 找不到 skills 目录，请确认脚本位于仓库根目录"
     exit 1
 fi
 
 # ========== 预检查：列出将被覆盖的文件 ==========
 overwrite_files=()
 
-# 检查 skill 文件
-if [ -d "$SKILL_DST" ]; then
-    while IFS= read -r -d '' file; do
-        rel_path="${file#$SKILL_SRC/}"
-        dst_file="$SKILL_DST/$rel_path"
-        if [ -f "$dst_file" ]; then
-            overwrite_files+=(".claude/skills/code-wiki/$rel_path")
-        fi
-    done < <(find "$SKILL_SRC" -type f -print0)
-fi
+# 检查所有 skill 文件
+for skill_dir in "$SKILLS_SRC"/*/; do
+    [ -d "$skill_dir" ] || continue
+    skill_name="$(basename "$skill_dir")"
+    skill_dst="$SKILLS_DST/$skill_name"
+
+    if [ -d "$skill_dst" ]; then
+        while IFS= read -r -d '' file; do
+            rel_path="${file#$skill_dir}"
+            dst_file="$skill_dst/$rel_path"
+            if [ -f "$dst_file" ]; then
+                overwrite_files+=(".claude/skills/$skill_name/$rel_path")
+            fi
+        done < <(find "$skill_dir" -type f -print0)
+    fi
+done
 
 # 检查 agent 文件
-if [ -d "$AGENTS_DST" ]; then
+if [ -d "$AGENTS_SRC" ] && [ -d "$AGENTS_DST" ]; then
     for file in "$AGENTS_SRC"/*.md; do
         [ -f "$file" ] || continue
         filename="$(basename "$file")"
@@ -82,38 +88,50 @@ if [ ${#overwrite_files[@]} -gt 0 ]; then
 fi
 
 # ========== 创建目录 ==========
-mkdir -p "$SKILL_DST/references"
-mkdir -p "$SKILL_DST/scripts"
+mkdir -p "$SKILLS_DST"
 mkdir -p "$AGENTS_DST"
 
 # ========== 复制 skill 文件 ==========
-echo "正在安装 skill 文件..."
+skill_count=0
+for skill_dir in "$SKILLS_SRC"/*/; do
+    [ -d "$skill_dir" ] || continue
+    skill_name="$(basename "$skill_dir")"
+    skill_dst="$SKILLS_DST/$skill_name"
 
-cp "$SKILL_SRC/SKILL.md" "$SKILL_DST/SKILL.md"
-echo "  ✓ SKILL.md"
+    mkdir -p "$skill_dst"
 
-cp "$SKILL_SRC/references/"* "$SKILL_DST/references/"
-echo "  ✓ references/ ($(ls "$SKILL_SRC/references/" | wc -l | tr -d ' ') 个文件)"
+    # 递归复制 skill 目录下的所有内容
+    cp -R "$skill_dir." "$skill_dst/"
 
-cp "$SKILL_SRC/scripts/scan.py" "$SKILL_DST/scripts/scan.py"
-echo "  ✓ scripts/scan.py"
+    file_count=$(find "$skill_dst" -type f | wc -l | tr -d ' ')
+    echo "  ✓ skills/$skill_name/ ($file_count 个文件)"
+    ((skill_count++))
+done
+
+echo "已安装 $skill_count 个 skill"
 
 # ========== 复制 agent 文件 ==========
-echo "正在安装 agent 文件..."
+if [ -d "$AGENTS_SRC" ]; then
+    echo "正在安装 agent 文件..."
 
-agent_count=0
-for file in "$AGENTS_SRC"/*.md; do
-    [ -f "$file" ] || continue
-    cp "$file" "$AGENTS_DST/"
-    echo "  ✓ $(basename "$file")"
-    ((agent_count++))
-done
+    agent_count=0
+    for file in "$AGENTS_SRC"/*.md; do
+        [ -f "$file" ] || continue
+        cp "$file" "$AGENTS_DST/"
+        echo "  ✓ $(basename "$file")"
+        ((agent_count++))
+    done
+
+    echo "已安装 $agent_count 个 agent"
+fi
 
 # ========== 完成 ==========
 echo ""
 echo "安装完成！"
 echo "  目标项目: $TARGET_PROJECT"
-echo "  Skill: .claude/skills/code-wiki/"
-echo "  Agents: .claude/agents/ ($agent_count 个)"
+echo "  Skills:  .claude/skills/ ($skill_count 个)"
+echo "  Agents:  .claude/agents/"
 echo ""
-echo "在目标项目中使用 /code-wiki 即可启动"
+echo "可用命令："
+echo "  /code-wiki init | scan | query | lint"
+echo "  /module-test-gen init | generate | run"

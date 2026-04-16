@@ -1,0 +1,46 @@
+# =============================================================================
+# 模块测试配置模板
+# =============================================================================
+# 此文件定义单个模块需要测试的内容。
+#
+# 每一项都有一个 "source" 字段：
+#   manual — 工程师编写，Claude 不会修改
+#   auto   — Claude 在 init/generate 过程中生成，工程师可以删除
+#
+# 工作流程：
+#   1. 工程师创建此文件（或由 Claude 通过 "init" 生成）
+#   2. Claude 通过 "generate" 补充完善（添加 auto 条目）
+#   3. 工程师审查并编辑
+#   4. Claude 通过 "run" 生成测试代码并运行
+# =============================================================================
+
+module: example-module
+language: python              # python | cpp
+test_framework: pytest        # pytest | googletest
+
+features:
+  # ----- 示例：工程师指定的功能 -----
+  - name: "订单创建"
+    source: manual
+    related_code:
+      - path: "src/payment/order.py"
+        source: manual
+      - path: "src/payment/types.py"
+        source: auto                    # Claude 发现的依赖
+    test_targets:
+      - description: "输入和输出的数据结构应该一致"
+        source: manual
+      - description: "金额为负数时应拒绝创建订单"
+        source: auto                    # Claude 建议的测试
+
+  # ----- 示例：Claude 发现的功能 -----
+  - name: "幂等性校验"
+    source: auto                        # 整个功能由 Claude 发现
+    related_code:
+      - path: "src/utils/idempotency.py"
+        source: auto
+    test_targets:
+      - description: "重复的幂等 key 应该被拒绝"
+        source: auto
+      - description: "过期的 key 应该允许重试"
+        source: auto

@@ -1,14 +1,14 @@
 #!/bin/bash
 # code-wiki 反向同步脚本
-# 从指定项目中已安装的 code-wiki 文件更新本仓库（主仓库）
+# 从指定项目中已安装的 skill/agent 文件更新本仓库（主仓库）
 #
 # 用法:
 #   ./sync_from_project.sh <项目路径>
 #   ./sync_from_project.sh /path/to/project_with_code_wiki
 #
 # 功能:
-#   - 从 <项目>/.claude/skills/code-wiki/ 复制回 skill 文件
-#   - 从 <项目>/.claude/agents/ 复制回 code-wiki 相关 agent 文件
+#   - 从 <项目>/.claude/skills/ 复制回所有 skill 文件
+#   - 从 <项目>/.claude/agents/ 复制回 agent 文件
 #   - 已存在的文件会被覆盖（会提示确认）
 
 set -euo pipefail
@@ -30,20 +30,15 @@ if [ ! -d "$SOURCE_PROJECT" ]; then
 fi
 
 # ========== 定义路径 ==========
-SKILL_SRC="$SOURCE_PROJECT/.claude/skills/code-wiki"
+SKILLS_SRC="$SOURCE_PROJECT/.claude/skills"
 AGENTS_SRC="$SOURCE_PROJECT/.claude/agents"
 
-SKILL_DST="$SCRIPT_DIR/skill"
+SKILLS_DST="$SCRIPT_DIR/skills"
 AGENTS_DST="$SCRIPT_DIR/agents"
 
-# ========== 检查源项目是否有 code-wiki ==========
-if [ ! -d "$SKILL_SRC" ]; then
-    echo "错误: 目标项目中未找到 code-wiki skill: $SKILL_SRC"
-    exit 1
-fi
-
-if [ ! -f "$SKILL_SRC/SKILL.md" ]; then
-    echo "错误: 目标项目中未找到 SKILL.md: $SKILL_SRC/SKILL.md"
+# ========== 检查源项目是否有已安装的 skill ==========
+if [ ! -d "$SKILLS_SRC" ]; then
+    echo "错误: 目标项目中未找到 skills 目录: $SKILLS_SRC"
     exit 1
 fi
 
@@ -53,32 +48,44 @@ echo "比较文件差异..."
 changed_files=()
 new_files=()
 
-# 比较 skill 文件
-while IFS= read -r -d '' file; do
-    rel_path="${file#$SKILL_SRC/}"
-    dst_file="$SKILL_DST/$rel_path"
-    if [ -f "$dst_file" ]; then
-        if ! diff -q "$file" "$dst_file" > /dev/null 2>&1; then
-            changed_files+=("skill/$rel_path")
-        fi
-    else
-        new_files+=("skill/$rel_path")
+# 比较所有 skill 文件
+for skill_dir in "$SKILLS_DST"/*/; do
+    [ -d "$skill_dir" ] || continue
+    skill_name="$(basename "$skill_dir")"
+    skill_src="$SKILLS_SRC/$skill_name"
+
+    if [ ! -d "$skill_src" ]; then
+        continue
     fi
-done < <(find "$SKILL_SRC" -type f -not -name '__pycache__' -not -path '*__pycache__*' -print0)
+
+    while IFS= read -r -d '' file; do
+        rel_path="${file#$skill_src/}"
+        dst_file="$skill_dir$rel_path"
+        if [ -f "$dst_file" ]; then
+            if ! diff -q "$file" "$dst_file" > /dev/null 2>&1; then
+                changed_files+=("skills/$skill_name/$rel_path")
+            fi
+        else
+            new_files+=("skills/$skill_name/$rel_path")
+        fi
+    done < <(find "$skill_src" -type f -not -name '__pycache__' -not -path '*__pycache__*' -print0)
+done
 
 # 比较 agent 文件
-for file in "$AGENTS_SRC"/code-wiki-*.md; do
-    [ -f "$file" ] || continue
-    filename="$(basename "$file")"
-    dst_file="$AGENTS_DST/$filename"
-    if [ -f "$dst_file" ]; then
-        if ! diff -q "$file" "$dst_file" > /dev/null 2>&1; then
-            changed_files+=("agents/$filename")
+if [ -d "$AGENTS_SRC" ]; then
+    for file in "$AGENTS_SRC"/*.md; do
+        [ -f "$file" ] || continue
+        filename="$(basename "$file")"
+        dst_file="$AGENTS_DST/$filename"
+        if [ -f "$dst_file" ]; then
+            if ! diff -q "$file" "$dst_file" > /dev/null 2>&1; then
+                changed_files+=("agents/$filename")
+            fi
+        else
+            new_files+=("agents/$filename")
         fi
-    else
-        new_files+=("agents/$filename")
-    fi
-done
+    done
+fi
 
 # ========== 显示结果 ==========
 if [ ${#changed_files[@]} -eq 0 ] && [ ${#new_files[@]} -eq 0 ]; then
@@ -108,39 +115,49 @@ if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
     exit 0
 fi
 
-# ========== 创建目录 ==========
-mkdir -p "$SKILL_DST/references"
-mkdir -p "$SKILL_DST/scripts"
-mkdir -p "$AGENTS_DST"
-
 # ========== 同步 skill 文件 ==========
 echo "正在同步 skill 文件..."
 
-cp "$SKILL_SRC/SKILL.md" "$SKILL_DST/SKILL.md"
+for skill_dir in "$SKILLS_DST"/*/; do
+    [ -d "$skill_dir" ] || continue
+    skill_name="$(basename "$skill_dir")"
+    skill_src="$SKILLS_SRC/$skill_name"
 
-if ls "$SKILL_SRC/references/"* > /dev/null 2>&1; then
-    cp "$SKILL_SRC/references/"* "$SKILL_DST/references/"
-fi
+    if [ ! -d "$skill_src" ]; then
+        continue
+    fi
 
-if [ -f "$SKILL_SRC/scripts/scan.py" ]; then
-    cp "$SKILL_SRC/scripts/scan.py" "$SKILL_DST/scripts/scan.py"
-fi
+    # 确保目标子目录存在
+    mkdir -p "$skill_dir"
 
-echo "  ✓ skill 文件已同步"
+    # 同步文件
+    while IFS= read -r -d '' file; do
+        rel_path="${file#$skill_src/}"
+        dst_file="$skill_dir$rel_path"
+        mkdir -p "$(dirname "$dst_file")"
+        cp "$file" "$dst_file"
+    done < <(find "$skill_src" -type f -not -name '__pycache__' -not -path '*__pycache__*' -print0)
+
+    echo "  ✓ skills/$skill_name/"
+done
 
 # ========== 同步 agent 文件 ==========
 echo "正在同步 agent 文件..."
 
+mkdir -p "$AGENTS_DST"
+
 agent_count=0
-for file in "$AGENTS_SRC"/code-wiki-*.md; do
-    [ -f "$file" ] || continue
-    cp "$file" "$AGENTS_DST/"
-    echo "  ✓ $(basename "$file")"
-    ((agent_count++))
-done
+if [ -d "$AGENTS_SRC" ]; then
+    for file in "$AGENTS_SRC"/*.md; do
+        [ -f "$file" ] || continue
+        cp "$file" "$AGENTS_DST/"
+        echo "  ✓ $(basename "$file")"
+        ((agent_count++))
+    done
+fi
 
 if [ "$agent_count" -eq 0 ]; then
-    echo "  (未找到 code-wiki agent 文件)"
+    echo "  (未找到 agent 文件)"
 fi
 
 # ========== 完成 ==========
