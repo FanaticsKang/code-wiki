@@ -1,0 +1,221 @@
+"""
+共享工具函数 — 所有生成的单元测试文件都会 import 此模块。
+
+此文件由 unit-test-gen skill 生成，请不要手动修改。
+如需扩展工具函数，请更新 skill 的 templates/_helpers.py.template 后重新生成。
+"""
+import asyncio
+import math
+import sys
+from typing import Any, Callable
+from unittest.mock import MagicMock
+
+
+# =============================================================================
+# 边界值字典 — 用于参数化边界测试
+# =============================================================================
+
+BOUNDARY_VALUES: dict[str, list] = {
+    "int": [
+        0,
+        -1,
+        1,
+        sys.maxsize,
+        -sys.maxsize - 1,
+    ],
+    "float": [
+        0.0,
+        -0.0,
+        1.0,
+        -1.0,
+        float("inf"),
+        float("-inf"),
+        float("nan"),
+        1e-308,    # 接近下溢
+        1e308,     # 接近上溢
+        sys.float_info.epsilon,
+    ],
+    "str": [
+        "",              # 空字符串
+        " ",             # 单空格
+        "\t",            # tab
+        "\n",            # 换行
+        "a",             # 单字符
+        "中文",          # 非 ASCII
+        "\x00",          # 空字节
+        "\u200b",        # 零宽空格
+        "a" * 10000,     # 长字符串
+    ],
+    "bytes": [
+        b"",
+        b"\x00",
+        b"\xff",
+        b"\x00" * 10000,
+    ],
+    "list": [
+        [],              # 空
+        [None],          # 单元素 None
+        [0],             # 单元素
+        [[]],            # 嵌套空
+        list(range(1000)),  # 大列表
+    ],
+    "dict": [
+        {},              # 空
+        {"k": None},     # None 值
+        {"": ""},        # 空 key 空 value
+        {i: i for i in range(100)},  # 较大
+    ],
+    "set": [
+        set(),
+        {None},
+        {0},
+    ],
+    "tuple": [
+        (),
+        (None,),
+        (0,),
+    ],
+    "none": [None],
+    "bool": [True, False],
+}
+
+
+def get_boundaries(type_name: str) -> list:
+    """
+    按类型名取边界值列表。
+
+    >>> get_boundaries("int")
+    [0, -1, 1, ...]
+    """
+    return BOUNDARY_VALUES.get(type_name.lower(), [])
+
+
+# =============================================================================
+# 异步函数包装
+# =============================================================================
+
+def call_async(coro):
+    """
+    同步调用异步函数。用法：
+
+        result = call_async(my_async_func(arg1, arg2))
+
+    避免对 pytest-asyncio 的依赖。适合简单的异步测试。
+    """
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # 已在事件循环内（罕见），创建新 loop
+            new_loop = asyncio.new_event_loop()
+            try:
+                return new_loop.run_until_complete(coro)
+            finally:
+                new_loop.close()
+        return loop.run_until_complete(coro)
+    except RuntimeError:
+        # 没有现成 loop
+        return asyncio.run(coro)
+
+
+# =============================================================================
+# 浮点断言（处理 NaN/Inf）
+# =============================================================================
+
+def assert_approx(actual: float, expected: float, tol: float = 1e-9) -> None:
+    """
+    浮点近似断言，正确处理 NaN 和 Inf。
+
+    - 两个 NaN 视为相等
+    - 同号 Inf 视为相等
+    - 其他情况用相对容差 + 绝对容差比较
+    """
+    # NaN 处理
+    if math.isnan(actual) and math.isnan(expected):
+        return
+    if math.isnan(actual) or math.isnan(expected):
+        raise AssertionError(f"NaN mismatch: actual={actual!r}, expected={expected!r}")
+
+    # Inf 处理
+    if math.isinf(actual) or math.isinf(expected):
+        if actual == expected:  # 同号 Inf
+            return
+        raise AssertionError(f"Inf mismatch: actual={actual!r}, expected={expected!r}")
+
+    # 常规比较
+    diff = abs(actual - expected)
+    if diff <= tol:
+        return
+    if expected != 0 and diff / abs(expected) <= tol:
+        return
+    raise AssertionError(
+        f"浮点断言失败: actual={actual!r}, expected={expected!r}, tol={tol}"
+    )
+
+
+# =============================================================================
+# 确定性验证（纯函数）
+# =============================================================================
+
+def assert_deterministic(func: Callable, *args, runs: int = 3, **kwargs) -> None:
+    """
+    确定性验证：同样输入调用 func 多次，结果必须完全一致。
+
+        assert_deterministic(format_id, "user", 42)
+    """
+    first = func(*args, **kwargs)
+    for i in range(runs - 1):
+        other = func(*args, **kwargs)
+        if other != first:
+            raise AssertionError(
+                f"确定性断言失败: 第 {i+2} 次调用结果与第 1 次不一致。\n"
+                f"  第 1 次: {first!r}\n"
+                f"  第 {i+2} 次: {other!r}"
+            )
+
+
+# =============================================================================
+# Mock 工具
+# =============================================================================
+
+def mock_file(content: str | bytes = "") -> MagicMock:
+    """
+    构造一个模拟文件对象，支持 read/write/close 和 context manager 协议。
+
+        with patch("builtins.open", return_value=mock_file("hello")):
+            ...
+    """
+    m = MagicMock()
+    if isinstance(content, str):
+        m.read.return_value = content
+        m.readlines.return_value = content.splitlines(keepends=True)
+    else:
+        m.read.return_value = content
+    m.__enter__ = MagicMock(return_value=m)
+    m.__exit__ = MagicMock(return_value=False)
+    return m
+
+
+def mock_response(
+    json_data: Any = None,
+    status_code: int = 200,
+    text: str = "",
+) -> MagicMock:
+    """
+    构造一个模拟 HTTP 响应对象，适用于 requests/httpx 等。
+
+        with patch("requests.get", return_value=mock_response(json_data={"id": 1})):
+            ...
+    """
+    m = MagicMock()
+    m.status_code = status_code
+    m.ok = 200 <= status_code < 300
+    m.json.return_value = json_data if json_data is not None else {}
+    m.text = text
+    m.content = text.encode() if text else b""
+    m.raise_for_status = MagicMock()
+    if status_code >= 400:
+        from urllib.error import HTTPError
+        m.raise_for_status.side_effect = HTTPError(
+            "", status_code, f"HTTP {status_code}", {}, None
+        )
+    return m
