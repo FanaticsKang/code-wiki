@@ -219,3 +219,115 @@ def mock_response(
             "", status_code, f"HTTP {status_code}", {}, None
         )
     return m
+
+
+# =============================================================================
+# 性能测试工具
+# =============================================================================
+
+PERFORMANCE_CONFIG: dict[str, dict] = {
+    "small": {"size": 100},
+    "medium": {"size": 10000},
+    "large": {"size": 100000},
+}
+
+
+def generate_large_input(
+    type_name: str,
+    size: int = 10000,
+    *,
+    element_factory: Callable | None = None,
+) -> Any:
+    """
+    生成指定类型和大小的大规模测试输入。
+
+        large_list = generate_large_input("list", size=50000)
+        large_str = generate_large_input("str", size=100000)
+    """
+    factory = element_factory or (lambda i: i)
+    if type_name == "list":
+        return [factory(i) for i in range(size)]
+    elif type_name == "dict":
+        return {i: factory(i) for i in range(size)}
+    elif type_name == "str":
+        return "a" * size
+    elif type_name == "bytes":
+        return b"\x00" * size
+    elif type_name == "set":
+        return {factory(i) for i in range(size)}
+    else:
+        return [factory(i) for i in range(size)]
+
+
+def assert_scalability(
+    func: Callable,
+    small_input: Any,
+    large_input: Any,
+    *,
+    max_ratio: float = 100.0,
+) -> float:
+    """
+    可扩展性断言：验证函数处理大规模输入的时间增长在合理范围内。
+
+    返回时间比率 (large_time / small_time)。
+    不做硬性阈值断言（CI 环境差异大），只记录时间并验证非指数增长。
+
+        ratio = assert_scalability(sort_data, small_list, large_list)
+    """
+    import time
+
+    # 预热
+    func(small_input)
+
+    start = time.perf_counter()
+    func(small_input)
+    small_time = time.perf_counter() - start
+
+    start = time.perf_counter()
+    func(large_input)
+    large_time = time.perf_counter() - start
+
+    ratio = large_time / small_time if small_time > 0 else float("inf")
+
+    if ratio > max_ratio:
+        raise AssertionError(
+            f"可扩展性断言失败: 大输入耗时是小输入的 {ratio:.1f} 倍 "
+            f"(阈值 {max_ratio})。小输入 {small_time:.6f}s，大输入 {large_time:.6f}s"
+        )
+
+    return ratio
+
+
+# =============================================================================
+# 安全测试输入 — 常见攻击向量
+# =============================================================================
+
+MALICIOUS_INPUTS: dict[str, list[tuple[str, str]]] = {
+    "command_injection": [
+        ("; rm -rf /", "semicolon command separator"),
+        ("$(rm -rf /)", "command substitution"),
+        ("`rm -rf /`", "backtick command substitution"),
+        ("| cat /etc/passwd", "pipe injection"),
+        ("&& malicious_command", "chain command"),
+        ("\n malicious_command", "newline injection"),
+    ],
+    "sql_injection": [
+        ("' OR '1'='1", "classic OR bypass"),
+        ("'; DROP TABLE users;--", "DROP statement"),
+        ("1; SELECT * FROM users", "stacked query"),
+        ("' UNION SELECT * FROM passwords--", "UNION injection"),
+        ("1 OR 1=1", "boolean injection"),
+    ],
+    "path_traversal": [
+        ("../../../etc/passwd", "basic traversal"),
+        ("..\\..\\..\\windows\\system32", "Windows traversal"),
+        ("....//....//etc/passwd", "double-dot bypass"),
+        ("%2e%2e%2f%2e%2e%2f", "URL-encoded traversal"),
+        ("/etc/passwd\x00", "null byte injection"),
+    ],
+    "xss": [
+        ("<script>alert('xss')</script>", "script tag injection"),
+        ("<img onerror=alert(1) src=x>", "event handler injection"),
+        ("javascript:alert(1)", "javascript protocol"),
+    ],
+}

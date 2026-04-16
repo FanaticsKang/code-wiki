@@ -85,6 +85,18 @@ class FeatureDetector(ast.NodeVisitor):
             "has_str_ops": False,
             "uses_regex": False,
             "has_iteration": False,
+            # 性能相关
+            "has_sort": False,
+            "has_recursion": False,
+            "has_large_comprehension": False,
+            "has_string_concat_in_loop": False,
+            # 安全相关
+            "has_subprocess": False,
+            "has_eval_exec": False,
+            "has_sql_ops": False,
+            "has_pickle": False,
+            "has_yaml_unsafe": False,
+            "has_shell_format": False,
         }
 
     def visit_BinOp(self, node: ast.BinOp) -> None:
@@ -106,6 +118,26 @@ class FeatureDetector(ast.NodeVisitor):
                     self.features["has_network"] = True
                 elif name == "re":
                     self.features["uses_regex"] = True
+                # 安全：subprocess.*, os.system(), os.popen()
+                elif name == "subprocess":
+                    self.features["has_subprocess"] = True
+                elif name == "os" and node.func.attr in ("system", "popen"):
+                    self.features["has_subprocess"] = True
+                # 安全：pickle.loads / pickle.load
+                elif name == "pickle" and node.func.attr in ("loads", "load"):
+                    self.features["has_pickle"] = True
+                # 安全：sqlite3.*, psycopg2.*
+                elif name in ("sqlite3", "psycopg2"):
+                    self.features["has_sql_ops"] = True
+                # 安全：yaml.load (非 SafeLoader)
+                elif name == "yaml" and node.func.attr == "load":
+                    self.features["has_yaml_unsafe"] = True
+            # .sort() 方法调用
+            if node.func.attr == "sort":
+                self.features["has_sort"] = True
+            # 安全：cursor.execute()
+            if node.func.attr == "execute":
+                self.features["has_sql_ops"] = True
             # x.split() / x.join() / x.replace() 等字符串方法
             if node.func.attr in (
                 "split", "join", "strip", "replace", "format",
@@ -118,6 +150,11 @@ class FeatureDetector(ast.NodeVisitor):
                 self.features["has_file_io"] = True
             elif node.func.id == "len":
                 self.features["uses_len"] = True
+            elif node.func.id == "sorted":
+                self.features["has_sort"] = True
+            # 安全：eval(), exec()
+            elif node.func.id in ("eval", "exec"):
+                self.features["has_eval_exec"] = True
 
         self.generic_visit(node)
 
@@ -147,6 +184,29 @@ class FeatureDetector(ast.NodeVisitor):
         self.features["has_iteration"] = True
         self.generic_visit(node)
 
+    def visit_DictComp(self, node: ast.DictComp) -> None:
+        self.features["has_large_comprehension"] = True
+        self.generic_visit(node)
+
+    def visit_SetComp(self, node: ast.SetComp) -> None:
+        self.features["has_large_comprehension"] = True
+        self.generic_visit(node)
+
+    def visit_While(self, node: ast.While) -> None:
+        self.features["has_iteration"] = True
+        self.generic_visit(node)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        # 检测 += 拼接（字符串或列表在循环中拼接的性能反模式）
+        if isinstance(node.op, ast.Add) and isinstance(node.target, ast.Name):
+            self.features["has_string_concat_in_loop"] = True
+        self.generic_visit(node)
+
+    def visit_JoinedStr(self, node: ast.JoinedStr) -> None:
+        # 检测 f-string（安全风险：可能传入 subprocess/eval）
+        self.features["has_shell_format"] = True
+        self.generic_visit(node)
+
     def visit_Attribute(self, node: ast.Attribute) -> None:
         # os.path.*
         if isinstance(node.value, ast.Name) and node.value.id == "os" and node.attr == "path":
@@ -173,6 +233,18 @@ def detect_float_type(func_node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool
     return False
 
 
+def detect_recursion(func_node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """检测函数是否存在直接递归调用（函数体内调用自身名称）。"""
+    func_name = func_node.name
+    for node in ast.walk(func_node):
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id == func_name:
+                return True
+            if isinstance(node.func, ast.Attribute) and node.func.attr == func_name:
+                return True
+    return False
+
+
 def decide_dimensions(features: dict, has_float: bool) -> list[str]:
     """根据特征决定适用维度。"""
     dims = ["functional", "boundary"]  # 必选
@@ -184,6 +256,17 @@ def decide_dimensions(features: dict, has_float: bool) -> list[str]:
     if (features["has_numeric_op"] or features["uses_math"]
             or features["uses_numpy"] or has_float):
         dims.append("data_integrity")
+
+    if (features["has_sort"] or features["has_recursion"]
+            or features["has_large_comprehension"]
+            or features["has_string_concat_in_loop"]
+            or (features["has_iteration"] and features["has_file_io"])):
+        dims.append("performance")
+
+    if (features["has_subprocess"] or features["has_eval_exec"]
+            or features["has_sql_ops"] or features["has_pickle"]
+            or features["has_yaml_unsafe"] or features["has_shell_format"]):
+        dims.append("security")
 
     return dims
 
@@ -205,6 +288,16 @@ def decide_mocks(features: dict, class_name: str | None) -> list[dict]:
         mocks.append({
             "type": "filesystem_query",
             "suggestion": "考虑 patch os.path.exists / os.path.isfile",
+        })
+    if features["has_subprocess"]:
+        mocks.append({
+            "type": "subprocess",
+            "suggestion": "patch subprocess.run / os.system 并构造安全返回值",
+        })
+    if features["has_sql_ops"]:
+        mocks.append({
+            "type": "database",
+            "suggestion": "patch sqlite3.connect / psycopg2.connect 并 mock cursor",
         })
     return mocks
 
@@ -322,6 +415,7 @@ def extract_functions_from_file(
         # 特征分析
         detector = FeatureDetector()
         detector.visit(func_node)
+        detector.features["has_recursion"] = detect_recursion(func_node)
         has_float = detect_float_type(func_node)
 
         dims = decide_dimensions(detector.features, has_float)

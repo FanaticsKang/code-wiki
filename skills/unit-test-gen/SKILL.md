@@ -1,8 +1,8 @@
 ---
 name: unit-test-gen
 description: >
-  仓库级单元测试自动生成。自动扫描源码、AST 解析函数签名与行为、按四个维度
-  （功能性/边界/异常容错/数据完整性）动态生成 pytest 测试用例、执行并输出报告。
+  仓库级单元测试自动生成。自动扫描源码、AST 解析函数签名与行为、按六个维度
+  （功能性/边界/异常容错/数据完整性/性能/安全）动态生成 pytest 测试用例、执行并输出报告。
   当用户提到"单元测试"、"生成测试"、"测试覆盖率"、"pytest"、"增量测试"、
   "回归测试"、"unit test"、"跑测试"、"给函数加测试"、"哪些函数没被测试"时触发。
   当用户提及 test/generated_unit/ 目录或 testcases.json 基线文件时也应触发。
@@ -13,7 +13,7 @@ description: >
 
 # 单元测试生成器
 
-全自动的仓库级单元测试生成技能。扫描代码 → 分析函数行为 → 按四个维度生成 pytest
+全自动的仓库级单元测试生成技能。扫描代码 → 分析函数行为 → 按六个维度生成 pytest
 测试 → 执行并出报告。全程无需人工介入。
 
 与 `module-test-gen`（模块级，半自动）不同，本技能是**全自动**的：不生成需要工程师
@@ -114,7 +114,7 @@ test/generated_unit/
 
 ---
 
-## 四个测试维度
+## 六个测试维度
 
 每个函数根据其代码特征生成不同维度的测试：
 
@@ -124,6 +124,8 @@ test/generated_unit/
 | 边界（boundary） | 所有函数 | 是 |
 | 异常容错（exception） | 检测到 `try/except`、`raise`、IO 操作、外部调用 | 否 |
 | 数据完整性（data_integrity） | 检测到浮点运算、数值计算、`math.*`、`numpy.*` | 否 |
+| 性能（performance） | 检测到排序、递归、大型推导式、循环内字符串拼接、大文件迭代 | 否 |
+| 安全（security） | 检测到 `subprocess`、`eval/exec`、SQL 操作、`pickle`、不安全 `yaml.load` | 否 |
 
 ### 维度判定的 AST 分析
 
@@ -139,6 +141,11 @@ test/generated_unit/
 | 集合操作 | `len()`、`[0]`、`[-1]`、切片 | 边界（空集合） |
 | 字符串操作 | `.split()`、`.join()`、正则 | 边界（空字符串、特殊字符） |
 | 纯函数 | 无副作用、无 IO | 确定性测试 + 往返测试 |
+| 排序/递归/推导式 | `sorted()`、`.sort()`、函数自调用、`DictComp`/`SetComp` | 性能 |
+| 循环内字符串拼接 | `+=` 拼接字符串 | 性能 |
+| 子进程/eval | `subprocess.*`、`os.system()`、`eval()`、`exec()` | 安全 |
+| SQL/序列化 | `sqlite3.*`、`psycopg2.*`、`pickle.loads()`、`yaml.load()` | 安全 |
+| Shell 格式化 | f-string 或 `.format()` 传入 subprocess | 安全 |
 
 ### 各维度的测试策略
 
@@ -164,6 +171,19 @@ test/generated_unit/
 - 精度验证：`pytest.approx(expected, rel=1e-9)`
 - 确定性验证：同样输入调用多次，结果必须一致
 - 往返验证：`decode(encode(x)) == x`、`deserialize(serialize(x)) == x`
+
+**性能（按需）**：
+- 基本负载测试：大规模输入（可配置大小）下验证函数能完成执行
+- 时间记录：不设硬性超时阈值，记录执行时间供报告分析
+- 可扩展性测试：对比小输入和大输入的执行时间比，验证非指数增长
+- 内存稳定性：验证大输入下不引发内存异常
+
+**安全（按需）**：
+- 命令注入测试：特殊字符（`;`、`$()`、`` ` ``、`|`）输入不触发 shell 执行
+- SQL 注入测试：SQL 片段输入不改变查询语义（验证参数化查询）
+- 路径遍历测试：`../` 等路径不越界访问
+- eval/exec 测试：任意代码字符串不被执行
+- 输入清洗验证：XSS 向量在输出中被转义或移除
 
 ---
 
@@ -192,6 +212,8 @@ test/generated_unit/
 | 类方法 | `MagicMock(spec=Class)` |
 | numpy/pyarrow | 直接使用真实库（纯数据变换，无副作用） |
 | 异步函数 | `call_async(coro)` 包装，或 `pytest-asyncio` |
+| 子进程调用 | `patch("subprocess.run")` 并构造安全返回值 |
+| 数据库操作 | `patch("sqlite3.connect")` 并 mock cursor.execute |
 
 **纯数据变换永远不需要 mock**：numpy 操作、字符串处理、数值计算等直接构造输入调用即可。
 
@@ -292,7 +314,7 @@ test/generated_unit/
           "signature": "parse_header(data: bytes, strict: bool = False) -> Header",
           "is_async": false,
           "class_name": null,
-          "dimensions": ["functional", "boundary", "exception"],
+          "dimensions": ["functional", "boundary", "exception", "security"],
           "cases": [
             {
               "id": "parse_header_functional_normal",

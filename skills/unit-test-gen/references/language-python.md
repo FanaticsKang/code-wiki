@@ -84,6 +84,16 @@
 | 正则 | import `re` + `re.*` 调用 | `uses_regex` |
 | 迭代 | `ast.For` 或 `ast.comprehension` | `has_iteration` |
 | 无副作用 | 没有赋值到 self、global、或调用 IO/网络 | `is_pure` |
+| 排序操作 | `sorted()` 或 `.sort()` | `has_sort` |
+| 递归调用 | 函数体内调用自身名称 | `has_recursion` |
+| 大型推导式 | `ast.DictComp`、`ast.SetComp` | `has_large_comprehension` |
+| 循环内字符串拼接 | `ast.AugAssign` 且 `op=Add`、值为字符串 | `has_string_concat_in_loop` |
+| 子进程调用 | `subprocess.*`、`os.system()`、`os.popen()` | `has_subprocess` |
+| eval/exec | `eval()`、`exec()` | `has_eval_exec` |
+| SQL 操作 | `sqlite3.*`、`psycopg2.*`、`cursor.execute()` | `has_sql_ops` |
+| pickle 反序列化 | `pickle.loads()`、`pickle.load()` | `has_pickle` |
+| 不安全 YAML | `yaml.load()`（非 SafeLoader） | `has_yaml_unsafe` |
+| Shell 格式化 | f-string（`ast.JoinedStr`）或 `.format()` | `has_shell_format` |
 
 ### 维度判定规则
 
@@ -97,6 +107,15 @@ if has_try or has_raise or has_file_io or has_network:
 
 if has_numeric_op or uses_math or uses_numpy or has_float_type:
     dimensions.append("data_integrity")
+
+if has_sort or has_recursion or has_large_comprehension \
+        or has_string_concat_in_loop \
+        or (has_iteration and has_file_io):
+    dimensions.append("performance")
+
+if has_subprocess or has_eval_exec or has_sql_ops \
+        or has_pickle or has_yaml_unsafe or has_shell_format:
+    dimensions.append("security")
 ```
 
 ### Mock 需求判定
@@ -111,6 +130,10 @@ if has_network:
     mocks_needed.append(("network", "patch requests.get / httpx.get"))
 if uses_os_path and not is_pure:
     mocks_needed.append(("os_path", "consider patch os.path.exists"))
+if has_subprocess:
+    mocks_needed.append(("subprocess", "patch subprocess.run / os.system"))
+if has_sql_ops:
+    mocks_needed.append(("database", "patch sqlite3.connect and mock cursor"))
 # 类方法如果有复杂 __init__ 依赖
 if class_name and has_complex_deps:
     mocks_needed.append(("class_deps", "use MagicMock(spec=Class)"))
@@ -145,6 +168,10 @@ from test.generated_unit._helpers import (
     BOUNDARY_VALUES,
     mock_file,
     mock_response,
+    generate_large_input,
+    assert_scalability,
+    PERFORMANCE_CONFIG,
+    MALICIOUS_INPUTS,
 )
 
 from src.core.parser import parse_header, Header  # 被测代码
@@ -163,6 +190,8 @@ from src.core.parser import parse_header, Header  # 被测代码
 - `test_parse_header_boundary_empty_bytes`
 - `test_parse_header_exception_truncated`
 - `test_compute_rate_data_integrity_precision`
+- `test_sort_data_performance_large_input`
+- `test_execute_command_security_injection`
 
 类方法命名：`test_<类名小写>_<方法名>_<维度>_<描述>`
 
@@ -244,6 +273,129 @@ def test_encode_decode_data_integrity_roundtrip():
     """encode 后 decode 应还原原值"""
     for original in [{"a": 1}, [], "hello", 3.14]:
         assert decode(encode(original)) == original
+```
+
+### 性能测试模板
+
+**基本负载测试**：
+```python
+def test_sort_data_performance_large_input():
+    """大规模输入下排序应在合理时间内完成"""
+    large_input = generate_large_input("list", PERFORMANCE_CONFIG["large"]["size"])
+    import time
+    start = time.perf_counter()
+    result = sort_data(large_input)
+    elapsed = time.perf_counter() - start
+    # 不做硬性超时断言，记录时间供 CI 报告
+    assert isinstance(result, list)
+    assert len(result) == len(large_input)
+```
+
+**可扩展性测试**：
+```python
+def test_search_index_performance_scalability():
+    """验证处理时间随输入规模线性增长"""
+    small = generate_large_input("list", 100)
+    large = generate_large_input("list", 10000)
+    ratio = assert_scalability(search_index, small, large, max_ratio=200.0)
+    # ratio 记录在报告中供人工审查
+```
+
+**递归深度测试**：
+```python
+def test_fibonacci_performance_deep_recursion():
+    """较深递归不应导致栈溢出"""
+    # 使用不会触发 sys.setrecursionlimit 的值
+    result = fibonacci(30)
+    assert isinstance(result, int)
+    assert result > 0
+```
+
+**内存稳定性测试**：
+```python
+def test_build_report_performance_memory():
+    """大字符串拼接不应导致内存异常"""
+    chunks = [f"chunk_{i}" for i in range(10000)]
+    result = build_report(chunks)
+    assert isinstance(result, str)
+    assert len(result) > 0
+```
+
+### 安全测试模板
+
+**命令注入测试**：
+```python
+@patch("subprocess.run")
+def test_execute_command_security_injection(mock_run):
+    """用户输入中的特殊字符不应被执行为 shell 命令"""
+    mock_run.return_value = MagicMock(returncode=0, stdout=b"ok")
+    for malicious, desc in MALICIOUS_INPUTS["command_injection"]:
+        execute_command(malicious)
+        # 验证传入 subprocess.run 的参数未被 shell 解释
+        call_args = mock_run.call_args
+        if isinstance(call_args[0][0], str):
+            # 如果是字符串调用，验证未使用 shell=True
+            assert call_args[1].get("shell") is not True, \
+                f"shell=True 与用户输入组合不安全: {desc}"
+    mock_run.reset_mock()
+```
+
+**SQL 注入测试**：
+```python
+@patch("sqlite3.connect")
+def test_query_user_security_sql_injection(mock_connect):
+    """用户输入中的 SQL 片段不应改变查询语义"""
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = None
+    mock_connect.return_value.cursor.return_value = mock_cursor
+
+    for malicious, desc in MALICIOUS_INPUTS["sql_injection"]:
+        query_user(malicious)
+        # 验证使用了参数化查询而非字符串拼接
+        for call in mock_cursor.execute.call_args_list:
+            sql = call[0][0] if call[0] else ""
+            assert malicious not in sql, \
+                f"用户输入直接拼接到 SQL 中: {desc}"
+    mock_cursor.reset_mock()
+```
+
+**路径遍历测试**：
+```python
+def test_read_file_security_path_traversal(tmp_path):
+    """用户控制的文件路径不应越界访问"""
+    safe_dir = tmp_path / "safe"
+    safe_dir.mkdir()
+    (safe_dir / "allowed.txt").write_text("ok")
+
+    for malicious, desc in MALICIOUS_INPUTS["path_traversal"]:
+        result = read_file(safe_dir, malicious)
+        # 函数应拒绝路径遍历尝试
+        assert result is None or "error" in str(result).lower(), \
+            f"路径遍历未被阻止: {desc}"
+```
+
+**eval/exec 安全测试**：
+```python
+def test_evaluate_expression_security_code_injection():
+    """eval/exec 不应执行任意代码"""
+    dangerous_inputs = [
+        "__import__('os').system('echo pwned')",
+        "open('/etc/passwd').read()",
+        "().__class__.__bases__[0].__subclasses__()",
+    ]
+    for dangerous in dangerous_inputs:
+        with pytest.raises((ValueError, TypeError, AttributeError)):
+            evaluate_expression(dangerous)
+```
+
+**输入清洗验证**：
+```python
+def test_sanitize_input_security_xss():
+    """输出应清洗 XSS 向量"""
+    for malicious, desc in MALICIOUS_INPUTS["xss"]:
+        result = sanitize_input(malicious)
+        assert "<script>" not in result.lower(), \
+            f"XSS 向量未被清洗: {desc}"
 ```
 
 ### 异步函数测试模板
