@@ -8,7 +8,7 @@ description: >
   当用户提及 test/generated_unit/ 目录或 test_cases.json 基线文件时也应触发。
   此技能是全自动的：扫描仓库 → 分析函数 → 生成测试代码 → 运行并出报告，
   默认不需要人工干预。支持全量和增量两种模式，增量模式通过 MD5 哈希检测变更
-  只重测受影响的函数。当前支持 Python，架构预留 C++ 等语言。
+  只重测受影响的函数。当前支持 Python（pytest）和 C++（Google Test）。
 ---
 
 # 单元测试生成器
@@ -56,7 +56,8 @@ description: >
 ```
 test/generated_unit/
 ├── test_cases.json              # 基线文件（元数据 + MD5，不含测试代码）
-├── _helpers.py                 # 共享工具函数（各语言对应文件名不同）
+├── _helpers.py                 # Python 共享工具函数
+├── _helpers.hpp                # C++ 共享工具头文件
 ├── report.md                   # 测试报告
 ├── core/
 │   └── test_parser.py          # 对应 src/core/parser.py
@@ -65,6 +66,10 @@ test/generated_unit/
 └── api/
     └── test_handlers.py        # 对应 src/api/handlers.py
 ```
+
+C++ 项目的目录结构类似，测试文件扩展名为 `.cpp`，辅助文件为 `_helpers.hpp`。
+
+混合语言仓库中，Python 和 C++ 测试文件共存于 `test/generated_unit/` 下。
 
 **命名规则**：源码 `src/<path>/<name>.<ext>` → 测试 `test/generated_unit/<path>/test_<name>.<ext>`。
 每个测试文件顶部加注释：
@@ -267,8 +272,8 @@ Regenerate with: /unit-test-gen auto
 {
   "version": "1.0",
   "generated_at": "2026-04-16T12:34:56+09:00",
-  "languages": ["python"],
-  "test_frameworks": {"python": "pytest"},
+  "languages": ["python", "cpp"],
+  "test_frameworks": {"python": "pytest", "cpp": "gtest"},
   "source_dirs": ["src"],
   "mode_last_run": "incremental",
   "summary": {
@@ -365,4 +370,11 @@ Regenerate with: /unit-test-gen auto
 - **`run_and_report.py`** — 执行测试并生成 markdown 报告。
   `python scripts/run_and_report.py --output report.md`
 
-各语言的详细扫描规则、测试代码生成规范、mock 实现和执行命令见 `references/` 下的语言参考文档（如 `references/language-python.md`）。
+各语言的详细扫描规则、测试代码生成规范、mock 实现和执行命令见 `references/` 下的语言参考文档（如 `references/language-python.md`、`references/language-cpp.md`）。
+
+### C++ 特定说明
+
+- **CMake 集成**：自动检测 `CMakeLists.txt`，在 `test/generated_unit/` 下生成 `CMakeLists.txt` 子配置
+- **gtest binary**：通过 `cmake --build` 编译测试目标，`ctest` 执行
+- **tree-sitter 解析**：C++ 代码通过 `tree_sitter` + `tree_sitter_cpp` 解析，需安装这两个包
+- **辅助头文件**：C++ 测试共享 `test/generated_unit/_helpers.hpp`，包含边界值常量、Mock 工具、性能断言等

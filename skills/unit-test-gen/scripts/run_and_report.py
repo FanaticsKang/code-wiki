@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-run_and_report.py — 执行 pytest 并生成 markdown 报告。
+run_and_report.py — 执行单元测试（pytest / Google Test）并生成 markdown 报告。
 
 用法：
     python run_and_report.py [--test-dir test/generated_unit/] \
@@ -79,6 +79,126 @@ def extract_failure_blocks(output: str) -> dict[str, str]:
                 body = blocks[i + 1].strip()
                 # 截断到前 1500 字符
                 failures[title] = body[:1500]
+    return failures
+
+
+# ---------------------------------------------------------------------------
+# Google Test 运行和解析
+# ---------------------------------------------------------------------------
+
+def run_gtest(test_dir: str, only_files: list[str] | None = None) -> dict:
+    """执行 Google Test 并收集结果。"""
+    # 查找 gtest binary（build/ 目录下）
+    build_dir = Path(test_dir).parent.parent / "build"
+    gtest_binary = _find_gtest_binary(build_dir)
+
+    if not gtest_binary:
+        return {
+            "exit_code": 1,
+            "stdout": "",
+            "stderr": f"未找到 gtest 测试二进制文件。请先构建项目：cmake --build {build_dir}",
+            "results": [],
+        }
+
+    cmd = [str(gtest_binary), "--gtest_color=no", "--gtest_print_time=1"]
+    if only_files:
+        # gtest 使用 filter 模式
+        filter_parts = []
+        for f in only_files:
+            # 从文件路径提取测试套件名（简化处理）
+            stem = Path(f).stem.replace("test_", "").replace("_", ".*")
+            filter_parts.append(f"*{stem}*")
+        if filter_parts:
+            cmd.append(f"--gtest_filter={':'.join(filter_parts)}")
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    return {
+        "exit_code": result.returncode,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "results": parse_gtest_output(result.stdout),
+    }
+
+
+def _find_gtest_binary(build_dir: Path) -> Path | None:
+    """在 build 目录中查找 gtest 可执行文件。"""
+    if not build_dir.is_dir():
+        return None
+
+    candidates = ["unit_tests", "test_runner", "tests", "runTests"]
+    for candidate in candidates:
+        binary = build_dir / candidate
+        if binary.is_file():
+            return binary
+
+    # 搜索可执行文件
+    for f in build_dir.rglob("*"):
+        if f.is_file() and f.stat().st_mode & 0o111:
+            name = f.name.lower()
+            if "test" in name and not name.endswith(".py"):
+                return f
+
+    return None
+
+
+def parse_gtest_output(output: str) -> list[dict]:
+    """从 gtest 控制台输出解析每个测试的结果。"""
+    results = []
+    # 匹配形如 "[       OK ] TestSuite.TestName (0 ms)"
+    # 或 "[  FAILED  ] TestSuite.TestName (0 ms)"
+    ok_pattern = re.compile(
+        r"^\[\s*OK\s*\]\s+(\S+)\.(\S+)",
+        re.MULTILINE,
+    )
+    failed_pattern = re.compile(
+        r"^\[\s*FAILED\s*\]\s+(\S+)\.(\S+)",
+        re.MULTILINE,
+    )
+
+    for match in ok_pattern.finditer(output):
+        suite = match.group(1).strip()
+        test_name = match.group(2).strip()
+        results.append({
+            "file": suite,
+            "name": test_name,
+            "outcome": "passed",
+            "nodeid": f"{suite}.{test_name}",
+        })
+
+    for match in failed_pattern.finditer(output):
+        suite = match.group(1).strip()
+        test_name = match.group(2).strip()
+        results.append({
+            "file": suite,
+            "name": test_name,
+            "outcome": "failed",
+            "nodeid": f"{suite}.{test_name}",
+        })
+
+    return results
+
+
+def extract_gtest_failures(output: str) -> dict[str, str]:
+    """从 gtest 输出提取失败测试的详细信息。"""
+    failures = {}
+    if "FAILED" not in output:
+        return failures
+
+    # gtest 失败格式：
+    # /path/to/test.cpp:42: Failure
+    # Expected: ...
+    #   Actual: ...
+    fail_blocks = re.split(r"(?m)^/.+?:\d+: Failure$", output)
+    for i in range(1, len(fail_blocks)):
+        body = fail_blocks[i].strip()
+        # 尝试从前面的上下文提取测试名
+        context = fail_blocks[i - 1]
+        # 查找最近的 [ RUN      ] 行
+        run_match = re.search(r"\[\s*RUN\s*\]\s+(\S+)\.(\S+)", context)
+        if run_match:
+            title = f"{run_match.group(1)}.{run_match.group(2)}"
+            failures[title] = body[:1500]
+
     return failures
 
 
@@ -189,7 +309,10 @@ def generate_report(
         lines.append("## 失败用例")
         lines.append("")
 
+        # 尝试两种格式的失败解析
         failure_blocks = extract_failure_blocks(test_results["stdout"])
+        if not failure_blocks:
+            failure_blocks = extract_gtest_failures(test_results["stdout"])
 
         for r in results:
             if r["outcome"] not in ("failed", "error"):
@@ -242,7 +365,9 @@ def generate_report(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="运行 pytest 并生成报告")
+    parser = argparse.ArgumentParser(
+        description="运行单元测试（pytest / Google Test）并生成报告"
+    )
     parser.add_argument(
         "--test-dir",
         default="test/generated_unit/",
@@ -277,11 +402,37 @@ def main():
         print(f"错误：测试目录 {test_dir} 不存在", file=sys.stderr)
         sys.exit(1)
 
-    print(f"执行 pytest on {test_dir}...")
-    test_results = run_pytest(str(test_dir), only_files=args.only)
-
     testcases_path = Path(args.testcases)
     testcases = load_testcases(testcases_path)
+
+    # 根据语言/框架选择测试运行器
+    frameworks = testcases.get("test_frameworks", {})
+    has_python = "python" in frameworks
+    has_cpp = "cpp" in frameworks
+
+    if has_cpp and not has_python:
+        print(f"执行 Google Test in {test_dir}...")
+        test_results = run_gtest(str(test_dir), only_files=args.only)
+    elif has_python and not has_cpp:
+        print(f"执行 pytest on {test_dir}...")
+        test_results = run_pytest(str(test_dir), only_files=args.only)
+    elif has_python and has_cpp:
+        # 混合仓库：两种都跑
+        print(f"混合仓库：先执行 pytest...")
+        py_results = run_pytest(str(test_dir), only_files=args.only)
+        print(f"再执行 Google Test...")
+        cpp_results = run_gtest(str(test_dir), only_files=args.only)
+        # 合并结果
+        test_results = {
+            "exit_code": py_results["exit_code"] or cpp_results["exit_code"],
+            "stdout": py_results["stdout"] + "\n" + cpp_results["stdout"],
+            "stderr": py_results["stderr"] + "\n" + cpp_results["stderr"],
+            "results": py_results["results"] + cpp_results["results"],
+        }
+    else:
+        # 默认尝试 pytest
+        print(f"执行 pytest on {test_dir}...")
+        test_results = run_pytest(str(test_dir), only_files=args.only)
 
     # 从 test_cases.json 读增量信息
     incremental_info = None

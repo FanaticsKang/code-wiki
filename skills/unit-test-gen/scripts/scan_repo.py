@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-scan_repo.py — 扫描 Python 代码仓库，提取所有可测试函数。
+scan_repo.py — 扫描代码仓库，提取所有可测试函数（支持 Python 和 C++）。
 
 输出 JSON 结构包含每个文件和函数的元信息（签名、MD5、AST 特征、适用维度）。
-Claude 读取此输出后决定生成哪些 pytest 测试用例。
+Claude 读取此输出后决定生成哪些测试用例。
 
 用法：
     python scan_repo.py <repo_root> [--source core,utils] [--baseline test_cases.json]
@@ -17,8 +17,18 @@ import hashlib
 import json
 import os
 import sys
+from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
+
+# C++ 解析（可选依赖，仅扫描 C++ 文件时需要）
+try:
+    import tree_sitter_cpp as tscpp
+    from tree_sitter import Language, Parser
+
+    _TS_AVAILABLE = True
+except ImportError:
+    _TS_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
 # 排除规则
@@ -33,8 +43,11 @@ SKIP_DIRS = {
 
 TEST_DIRS = {"test", "tests", "testing"}
 
+CPP_EXTENSIONS = {".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh", ".hxx"}
+PY_EXTENSIONS = {".py"}
 
-def should_skip_dir(path: Path, repo_root: Path) -> bool:
+
+def should_skip_dir(path: Path, _repo_root: Path) -> bool:
     """判断目录是否应跳过。"""
     name = path.name.lower()
     if name in SKIP_DIRS or name in TEST_DIRS:
@@ -47,25 +60,58 @@ def should_skip_dir(path: Path, repo_root: Path) -> bool:
 
 
 def should_skip_file(path: Path) -> bool:
-    """判断文件是否应跳过。"""
+    """判断文件是否应跳过（支持 Python 和 C++）。"""
     name = path.name
-    if not name.endswith(".py"):
+    ext = path.suffix.lower()
+
+    # 只处理已知扩展名
+    if ext not in PY_EXTENSIONS and ext not in CPP_EXTENSIONS:
         return True
-    # 私有模块（但 __init__.py 保留）
-    if name.startswith("_") and name != "__init__.py":
-        return True
-    # 生成的代码
-    if name.endswith("_generated.py"):
-        return True
+
+    # Python 私有模块（但 __init__.py 保留）
+    if ext == ".py":
+        if name.startswith("_") and name != "__init__.py":
+            return True
+        if name.endswith("_generated.py"):
+            return True
+
+    # C++ 头文件保护：跳过纯声明头文件（在解析时判断，此处先放行）
+
     return False
 
 
+def md5_text(text: str) -> str:
+    return hashlib.md5(text.encode("utf-8", errors="replace")).hexdigest()
+
+
 # ---------------------------------------------------------------------------
-# AST 特征分析
+# 语言分析器抽象基类
 # ---------------------------------------------------------------------------
 
-class FeatureDetector(ast.NodeVisitor):
-    """扫描函数体，记录影响测试维度的 AST 特征。"""
+class LanguageAnalyzer(ABC):
+    """语言特定的函数提取和特征分析基类。"""
+
+    @abstractmethod
+    def extract_functions(self, filepath: Path, repo_root: Path) -> dict:
+        """从一个源文件提取所有可测试函数。"""
+
+    @staticmethod
+    @abstractmethod
+    def decide_dimensions(features: dict) -> list[str]:
+        """根据特征决定适用维度。"""
+
+    @staticmethod
+    @abstractmethod
+    def decide_mocks(features: dict, class_name: str | None) -> list[dict]:
+        """根据特征决定需要的 mock。"""
+
+
+# ---------------------------------------------------------------------------
+# Python 分析器
+# ---------------------------------------------------------------------------
+
+class PythonFeatureDetector(ast.NodeVisitor):
+    """扫描 Python 函数体，记录影响测试维度的 AST 特征。"""
 
     def __init__(self):
         self.features = {
@@ -85,12 +131,10 @@ class FeatureDetector(ast.NodeVisitor):
             "has_str_ops": False,
             "uses_regex": False,
             "has_iteration": False,
-            # 性能相关
             "has_sort": False,
             "has_recursion": False,
             "has_large_comprehension": False,
             "has_string_concat_in_loop": False,
-            # 安全相关
             "has_subprocess": False,
             "has_eval_exec": False,
             "has_sql_ops": False,
@@ -106,7 +150,6 @@ class FeatureDetector(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
-        # math.*, numpy.*, requests.*, etc.
         if isinstance(node.func, ast.Attribute):
             if isinstance(node.func.value, ast.Name):
                 name = node.func.value.id
@@ -118,27 +161,20 @@ class FeatureDetector(ast.NodeVisitor):
                     self.features["has_network"] = True
                 elif name == "re":
                     self.features["uses_regex"] = True
-                # 安全：subprocess.*, os.system(), os.popen()
                 elif name == "subprocess":
                     self.features["has_subprocess"] = True
                 elif name == "os" and node.func.attr in ("system", "popen"):
                     self.features["has_subprocess"] = True
-                # 安全：pickle.loads / pickle.load
                 elif name == "pickle" and node.func.attr in ("loads", "load"):
                     self.features["has_pickle"] = True
-                # 安全：sqlite3.*, psycopg2.*
                 elif name in ("sqlite3", "psycopg2"):
                     self.features["has_sql_ops"] = True
-                # 安全：yaml.load (非 SafeLoader)
                 elif name == "yaml" and node.func.attr == "load":
                     self.features["has_yaml_unsafe"] = True
-            # .sort() 方法调用
             if node.func.attr == "sort":
                 self.features["has_sort"] = True
-            # 安全：cursor.execute()
             if node.func.attr == "execute":
                 self.features["has_sql_ops"] = True
-            # x.split() / x.join() / x.replace() 等字符串方法
             if node.func.attr in (
                 "split", "join", "strip", "replace", "format",
                 "startswith", "endswith", "lower", "upper",
@@ -152,7 +188,6 @@ class FeatureDetector(ast.NodeVisitor):
                 self.features["uses_len"] = True
             elif node.func.id == "sorted":
                 self.features["has_sort"] = True
-            # 安全：eval(), exec()
             elif node.func.id in ("eval", "exec"):
                 self.features["has_eval_exec"] = True
 
@@ -197,119 +232,144 @@ class FeatureDetector(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_AugAssign(self, node: ast.AugAssign) -> None:
-        # 检测 += 拼接（字符串或列表在循环中拼接的性能反模式）
         if isinstance(node.op, ast.Add) and isinstance(node.target, ast.Name):
             self.features["has_string_concat_in_loop"] = True
         self.generic_visit(node)
 
     def visit_JoinedStr(self, node: ast.JoinedStr) -> None:
-        # 检测 f-string（安全风险：可能传入 subprocess/eval）
         self.features["has_shell_format"] = True
         self.generic_visit(node)
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
-        # os.path.*
         if isinstance(node.value, ast.Name) and node.value.id == "os" and node.attr == "path":
             self.features["uses_os_path"] = True
         self.generic_visit(node)
 
 
-def detect_float_type(func_node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
-    """检测参数或返回值注解中是否含 float。"""
-    def has_float_in_annotation(ann):
-        if ann is None:
-            return False
+class PythonAnalyzer(LanguageAnalyzer):
+    """Python 函数提取和特征分析。"""
+
+    def extract_functions(self, filepath: Path, repo_root: Path) -> dict:
         try:
-            s = ast.unparse(ann)
-            return "float" in s.lower()
-        except Exception:
-            return False
+            source = filepath.read_text(encoding="utf-8", errors="replace")
+            tree = ast.parse(source, filename=str(filepath))
+        except (SyntaxError, UnicodeDecodeError) as e:
+            return {"error": str(e), "functions": {}}
 
-    for arg in func_node.args.args:
-        if has_float_in_annotation(arg.annotation):
-            return True
-    if has_float_in_annotation(func_node.returns):
-        return True
-    return False
+        source_lines = source.splitlines()
+        file_md5 = md5_text(source)
+        rel_path = str(filepath.relative_to(repo_root))
+        functions = {}
+
+        def _process_func(func_node, class_name=None):
+            if _is_stub(func_node):
+                return
+            if _is_property_setter(func_node):
+                return
+            if _is_overload(func_node):
+                return
+
+            detector = PythonFeatureDetector()
+            detector.visit(func_node)
+            detector.features["has_recursion"] = _detect_recursion(func_node)
+            has_float = _detect_float_type(func_node)
+
+            dims = self.decide_dimensions(detector.features, has_float)
+            mocks = self.decide_mocks(detector.features, class_name)
+
+            func_source = _get_source_segment(source_lines, func_node)
+            func_md5 = md5_text(func_source)
+            key = f"{class_name}.{func_node.name}" if class_name else func_node.name
+
+            functions[key] = {
+                "name": func_node.name,
+                "class_name": class_name,
+                "func_md5": func_md5,
+                "line_range": [func_node.lineno, func_node.end_lineno or func_node.lineno],
+                "signature": _extract_signature(func_node),
+                "is_async": isinstance(func_node, ast.AsyncFunctionDef),
+                "decorators": [
+                    ast.unparse(d) if hasattr(ast, "unparse") else str(d)
+                    for d in func_node.decorator_list
+                ],
+                "features": detector.features,
+                "has_float_type": has_float,
+                "dimensions": dims,
+                "mocks_needed": mocks,
+            }
+
+        for node in tree.body:
+            if isinstance(node, ast.If):
+                continue
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                _process_func(node)
+            elif isinstance(node, ast.ClassDef):
+                for child in node.body:
+                    if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        _process_func(child, class_name=node.name)
+
+        return {"file_md5": file_md5, "path": rel_path, "functions": functions}
+
+    @staticmethod
+    def decide_dimensions(features: dict, has_float: bool = False) -> list[str]:
+        dims = ["functional", "boundary"]
+
+        if (features.get("has_try") or features.get("has_raise")
+                or features.get("has_file_io") or features.get("has_network")):
+            dims.append("exception")
+
+        if (features.get("has_numeric_op") or features.get("uses_math")
+                or features.get("uses_numpy") or has_float):
+            dims.append("data_integrity")
+
+        if (features.get("has_sort") or features.get("has_recursion")
+                or features.get("has_large_comprehension")
+                or features.get("has_string_concat_in_loop")
+                or (features.get("has_iteration") and features.get("has_file_io"))):
+            dims.append("performance")
+
+        if (features.get("has_subprocess") or features.get("has_eval_exec")
+                or features.get("has_sql_ops") or features.get("has_pickle")
+                or features.get("has_yaml_unsafe") or features.get("has_shell_format")):
+            dims.append("security")
+
+        return dims
+
+    @staticmethod
+    def decide_mocks(features: dict, class_name: str | None) -> list[dict]:
+        mocks = []
+        if features.get("has_file_io"):
+            mocks.append({
+                "type": "file_io",
+                "suggestion": "使用 tmp_path fixture 或 patch('builtins.open')",
+            })
+        if features.get("has_network"):
+            mocks.append({
+                "type": "network",
+                "suggestion": "patch requests.get / httpx.get 并用 mock_response 构造响应",
+            })
+        if features.get("uses_os_path"):
+            mocks.append({
+                "type": "filesystem_query",
+                "suggestion": "考虑 patch os.path.exists / os.path.isfile",
+            })
+        if features.get("has_subprocess"):
+            mocks.append({
+                "type": "subprocess",
+                "suggestion": "patch subprocess.run / os.system 并构造安全返回值",
+            })
+        if features.get("has_sql_ops"):
+            mocks.append({
+                "type": "database",
+                "suggestion": "patch sqlite3.connect / psycopg2.connect 并 mock cursor",
+            })
+        return mocks
 
 
-def detect_recursion(func_node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
-    """检测函数是否存在直接递归调用（函数体内调用自身名称）。"""
-    func_name = func_node.name
-    for node in ast.walk(func_node):
-        if isinstance(node, ast.Call):
-            if isinstance(node.func, ast.Name) and node.func.id == func_name:
-                return True
-            if isinstance(node.func, ast.Attribute) and node.func.attr == func_name:
-                return True
-    return False
+# Python 私有辅助函数
 
-
-def decide_dimensions(features: dict, has_float: bool) -> list[str]:
-    """根据特征决定适用维度。"""
-    dims = ["functional", "boundary"]  # 必选
-
-    if (features["has_try"] or features["has_raise"]
-            or features["has_file_io"] or features["has_network"]):
-        dims.append("exception")
-
-    if (features["has_numeric_op"] or features["uses_math"]
-            or features["uses_numpy"] or has_float):
-        dims.append("data_integrity")
-
-    if (features["has_sort"] or features["has_recursion"]
-            or features["has_large_comprehension"]
-            or features["has_string_concat_in_loop"]
-            or (features["has_iteration"] and features["has_file_io"])):
-        dims.append("performance")
-
-    if (features["has_subprocess"] or features["has_eval_exec"]
-            or features["has_sql_ops"] or features["has_pickle"]
-            or features["has_yaml_unsafe"] or features["has_shell_format"]):
-        dims.append("security")
-
-    return dims
-
-
-def decide_mocks(features: dict, class_name: str | None) -> list[dict]:
-    """根据特征决定需要的 mock。"""
-    mocks = []
-    if features["has_file_io"]:
-        mocks.append({
-            "type": "file_io",
-            "suggestion": "使用 tmp_path fixture 或 patch('builtins.open')",
-        })
-    if features["has_network"]:
-        mocks.append({
-            "type": "network",
-            "suggestion": "patch requests.get / httpx.get 并用 mock_response 构造响应",
-        })
-    if features["uses_os_path"]:
-        mocks.append({
-            "type": "filesystem_query",
-            "suggestion": "考虑 patch os.path.exists / os.path.isfile",
-        })
-    if features["has_subprocess"]:
-        mocks.append({
-            "type": "subprocess",
-            "suggestion": "patch subprocess.run / os.system 并构造安全返回值",
-        })
-    if features["has_sql_ops"]:
-        mocks.append({
-            "type": "database",
-            "suggestion": "patch sqlite3.connect / psycopg2.connect 并 mock cursor",
-        })
-    return mocks
-
-
-# ---------------------------------------------------------------------------
-# 函数提取
-# ---------------------------------------------------------------------------
-
-def is_stub(func_node) -> bool:
-    """判断是否为存根函数（仅 pass 或 ...）。"""
+def _is_stub(func_node) -> bool:
     body = func_node.body
-    # 可能有 docstring
     start = 0
     if (body and isinstance(body[0], ast.Expr)
             and isinstance(body[0].value, ast.Constant)
@@ -328,33 +388,51 @@ def is_stub(func_node) -> bool:
     return False
 
 
-def has_decorator(func_node, name: str) -> bool:
-    """检查函数是否有特定装饰器。"""
-    for dec in func_node.decorator_list:
-        if isinstance(dec, ast.Name) and dec.id == name:
-            return True
-        if isinstance(dec, ast.Attribute) and dec.attr == name:
-            return True
-    return False
-
-
-def is_property_setter(func_node) -> bool:
-    """检查是否为 @x.setter。"""
+def _is_property_setter(func_node) -> bool:
     for dec in func_node.decorator_list:
         if isinstance(dec, ast.Attribute) and dec.attr == "setter":
             return True
     return False
 
 
-def is_overload(func_node) -> bool:
-    """检查是否有 @overload 装饰器。"""
-    return has_decorator(func_node, "overload")
+def _is_overload(func_node) -> bool:
+    for dec in func_node.decorator_list:
+        if isinstance(dec, ast.Name) and dec.id == "overload":
+            return True
+        if isinstance(dec, ast.Attribute) and dec.attr == "overload":
+            return True
+    return False
 
 
-def extract_signature(func_node) -> str:
-    """提取函数签名文本。"""
+def _detect_float_type(func_node) -> bool:
+    def _has_float_in_annotation(ann):
+        if ann is None:
+            return False
+        try:
+            s = ast.unparse(ann)
+            return "float" in s.lower()
+        except Exception:
+            return False
+
+    for arg in func_node.args.args:
+        if _has_float_in_annotation(arg.annotation):
+            return True
+    return _has_float_in_annotation(func_node.returns)
+
+
+def _detect_recursion(func_node) -> bool:
+    func_name = func_node.name
+    for node in ast.walk(func_node):
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id == func_name:
+                return True
+            if isinstance(node.func, ast.Attribute) and node.func.attr == func_name:
+                return True
+    return False
+
+
+def _extract_signature(func_node) -> str:
     try:
-        # 尝试从 args 构造
         parts = []
         for arg in func_node.args.args:
             s = arg.arg
@@ -375,120 +453,512 @@ def extract_signature(func_node) -> str:
         return func_node.name + "(...)"
 
 
-def get_source_segment(source_lines: list[str], node) -> str:
-    """提取函数的源码。"""
+def _get_source_segment(source_lines: list[str], node) -> str:
     start = node.lineno - 1
     end = node.end_lineno if hasattr(node, "end_lineno") else start + 1
     return "\n".join(source_lines[start:end])
 
 
-def md5_text(text: str) -> str:
-    return hashlib.md5(text.encode("utf-8", errors="replace")).hexdigest()
+# ---------------------------------------------------------------------------
+# C++ 分析器
+# ---------------------------------------------------------------------------
+
+# tree-sitter C++ 节点类型常量
+_CPP_FUNC_DEF = "function_definition"
+_CPP_CLASS_SPEC = "class_specifier"
+_CPP_STRUCT_SPEC = "struct_specifier"
+_CPP_TEMPLATE_DECL = "template_declaration"
+_CPP_TRY_STMT = "try_statement"
+_CPP_THROW_STMT = "throw_statement"
+_CPP_CALL_EXPR = "call_expression"
+_CPP_BIN_EXPR = "binary_expression"
+_CPP_SUBSCRIPT = "subscript_expression"
+_CPP_FOR_STMT = "for_statement"
+_CPP_WHILE_STMT = "while_statement"
+_CPP_DO_STMT = "do_statement"
+_CPP_RANGE_FOR = "range_based_for_statement"
+_CPP_NEW_EXPR = "new_expression"
+_CPP_DELETE_EXPR = "delete_expression"
+_CPP_TYPE_DESC = "type_descriptor"
+_CPP_FUNC_DECL = "function_declarator"
 
 
-def extract_functions_from_file(
-    filepath: Path, repo_root: Path
-) -> dict:
-    """从一个 Python 文件提取所有可测试函数。"""
-    try:
+class CppAnalyzer(LanguageAnalyzer):
+    """C++ 函数提取和特征分析（基于 tree-sitter）。"""
+
+    def __init__(self):
+        if not _TS_AVAILABLE:
+            raise RuntimeError(
+                "C++ 扫描需要 tree-sitter 依赖。"
+                "请安装: pip install tree-sitter tree-sitter-cpp"
+            )
+        self._language = Language(tscpp.language())  # type: ignore[misc]
+        self._parser = Parser(self._language)  # type: ignore[abstract]
+
+    def extract_functions(self, filepath: Path, repo_root: Path) -> dict:
         source = filepath.read_text(encoding="utf-8", errors="replace")
-        tree = ast.parse(source, filename=str(filepath))
-    except (SyntaxError, UnicodeDecodeError) as e:
-        return {"error": str(e), "functions": {}}
+        source_bytes = source.encode("utf-8")
+        file_md5 = md5_text(source)
+        rel_path = str(filepath.relative_to(repo_root))
 
-    source_lines = source.splitlines()
-    file_md5 = md5_text(source)
-    rel_path = str(filepath.relative_to(repo_root))
+        tree = self._parser.parse(source_bytes)
+        root = tree.root_node
 
-    functions = {}
+        functions = {}
+        self._walk_node(root, source_bytes, filepath, functions)
 
-    # 遍历顶层和类内的函数
-    def process_func(func_node, class_name=None):
-        # 过滤
-        if is_stub(func_node):
+        return {"file_md5": file_md5, "path": rel_path, "functions": functions}
+
+    def _walk_node(self, node, source_bytes: bytes,
+                   filepath: Path, functions: dict,
+                   namespace: str = "", class_name: str | None = None):
+        """递归遍历 tree-sitter AST，提取函数定义。"""
+        for child in node.children:
+            # 命名空间
+            if child.type == "namespace_definition":
+                ns_name = self._node_text(child.child_by_field_name("name"), source_bytes)
+                new_ns = f"{namespace}::{ns_name}" if namespace else ns_name
+                self._walk_node(child, source_bytes, filepath, functions, new_ns, class_name)
+                continue
+
+            # 类/结构体
+            if child.type in ("class_specifier", "struct_specifier"):
+                cn = self._node_text(child.child_by_field_name("name"), source_bytes)
+                full_class = f"{namespace}::{cn}" if namespace else cn
+                self._walk_node(child, source_bytes, filepath, functions, namespace, full_class)
+                continue
+
+            # 模板函数/模板类方法
+            if child.type == _CPP_TEMPLATE_DECL:
+                for inner in child.children:
+                    if inner.type == _CPP_FUNC_DEF:
+                        self._process_function(
+                            inner, source_bytes, filepath, functions,
+                            namespace, class_name, is_template=True)
+                    elif inner.type in (_CPP_CLASS_SPEC, _CPP_STRUCT_SPEC):
+                        cn = self._node_text(inner.child_by_field_name("name"), source_bytes)
+                        full_class = f"{namespace}::{cn}" if namespace else cn
+                        self._walk_node(inner, source_bytes, filepath, functions,
+                                        namespace, full_class)
+                continue
+
+            # 普通函数定义
+            if child.type == _CPP_FUNC_DEF:
+                self._process_function(
+                    child, source_bytes, filepath, functions,
+                    namespace, class_name)
+
+            # 递归子节点（处理嵌套结构）
+            if child.children:
+                self._walk_node(child, source_bytes, filepath, functions,
+                                namespace, class_name)
+
+    def _process_function(self, func_node, source_bytes: bytes,
+                          _filepath: Path, functions: dict,
+                          namespace: str, class_name: str | None,
+                          is_template: bool = False):
+        """处理单个函数定义节点。"""
+        # 获取声明器（含函数名和参数）
+        declarator = self._find_child(func_node, _CPP_FUNC_DECL)
+        if not declarator:
             return
-        if is_property_setter(func_node):
+
+        func_name = self._extract_func_name(declarator, source_bytes)
+        if not func_name:
             return
-        if is_overload(func_node):
+
+        # 过滤：main 函数
+        if func_name == "main":
             return
+
+        # 获取函数体
+        body_node = self._find_child(func_node, "compound_statement")
+        if not body_node:
+            return  # 纯声明，无定义
+
+        # 过滤：纯虚函数（= 0）和 = default / = delete
+        decl_text = self._node_text(declarator, source_bytes)
+        if "= 0" in decl_text or "=0" in decl_text.replace(" ", ""):
+            return
+        if "= default" in decl_text or "= delete" in decl_text:
+            return
+
+        # 过滤：析构函数
+        if func_name.startswith("~"):
+            return
+
+        # 提取签名
+        signature = self._build_signature(func_node, declarator, source_bytes)
 
         # 特征分析
-        detector = FeatureDetector()
-        detector.visit(func_node)
-        detector.features["has_recursion"] = detect_recursion(func_node)
-        has_float = detect_float_type(func_node)
+        features = self._analyze_features(body_node, source_bytes, func_name)
 
-        dims = decide_dimensions(detector.features, has_float)
-        mocks = decide_mocks(detector.features, class_name)
+        # 构建完整限定名
+        parts = []
+        if namespace:
+            parts.append(namespace)
+        if class_name:
+            parts.append(class_name)
+        parts.append(func_name)
+        qualified_name = "::".join(parts)
 
-        func_source = get_source_segment(source_lines, func_node)
+        # 维度和 mock
+        dims = self.decide_dimensions(features)
+        mocks = self.decide_mocks(features, class_name)
+
+        func_source = self._node_text(func_node, source_bytes)
         func_md5 = md5_text(func_source)
 
-        key = f"{class_name}.{func_node.name}" if class_name else func_node.name
-
-        functions[key] = {
-            "name": func_node.name,
+        functions[qualified_name] = {
+            "name": func_name,
+            "namespace": namespace or None,
             "class_name": class_name,
             "func_md5": func_md5,
-            "line_range": [func_node.lineno, func_node.end_lineno or func_node.lineno],
-            "signature": extract_signature(func_node),
-            "is_async": isinstance(func_node, ast.AsyncFunctionDef),
-            "decorators": [
-                ast.unparse(d) if hasattr(ast, "unparse") else str(d)
-                for d in func_node.decorator_list
-            ],
-            "features": detector.features,
-            "has_float_type": has_float,
+            "line_range": [func_node.start_point[0] + 1, func_node.end_point[0] + 1],
+            "signature": signature,
+            "is_async": False,
+            "is_template": is_template,
+            "is_static": "static" in (self._node_text(
+                self._find_child(func_node, "storage_class_specifier"),
+                source_bytes) or ""),
+            "is_virtual": "virtual" in (self._node_text(
+                self._find_child(func_node, "virtual"),
+                source_bytes) or ""),
+            "features": features,
             "dimensions": dims,
             "mocks_needed": mocks,
         }
 
-    for node in tree.body:
-        # 跳过 if __name__ == "__main__" 块
-        if isinstance(node, ast.If):
-            continue
+    def _analyze_features(self, body_node, source_bytes: bytes,
+                          func_name: str) -> dict:
+        """遍历函数体 tree-sitter AST，检测特征。"""
+        features = {
+            "has_numeric_op": False,
+            "has_float_type": False,
+            "uses_stl_math": False,
+            "has_try": False,
+            "has_throw": False,
+            "has_file_io": False,
+            "has_network": False,
+            "has_index_access": False,
+            "has_raw_pointer": False,
+            "has_new_delete": False,
+            "has_buffer_op": False,
+            "has_template": False,
+            "uses_smart_ptr": False,
+            "has_virtual": False,
+            "uses_stl_algo": False,
+            "has_sort": False,
+            "has_recursion": False,
+            "has_str_ops": False,
+            "has_iteration": False,
+            "is_pure": True,
+            "has_subprocess": False,
+            "has_printf": False,
+            "has_sql_ops": False,
+            "has_shell_format": False,
+            "has_container_growth": False,
+            "has_move_semantics": False,
+        }
 
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            process_func(node)
-        elif isinstance(node, ast.ClassDef):
-            for child in node.body:
-                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    process_func(child, class_name=node.name)
+        self._detect_recursive(body_node, source_bytes, func_name, features)
 
-    return {
-        "file_md5": file_md5,
-        "path": rel_path,
-        "functions": functions,
-    }
+        return features
+
+    def _detect_recursive(self, node, source_bytes: bytes,
+                          func_name: str, features: dict):
+        """递归遍历节点，检测所有特征。"""
+        if node is None:
+            return
+
+        # 检查当前节点类型
+        if node.type == _CPP_TRY_STMT:
+            features["has_try"] = True
+            features["is_pure"] = False
+
+        elif node.type == _CPP_THROW_STMT:
+            features["has_throw"] = True
+
+        elif node.type == _CPP_CALL_EXPR:
+            self._check_call_features(node, source_bytes, features, func_name)
+
+        elif node.type == _CPP_BIN_EXPR:
+            op = self._node_text(node.child_by_field_name("operator"), source_bytes)
+            if op in ("+", "-", "*", "/", "%"):
+                features["has_numeric_op"] = True
+
+        elif node.type == _CPP_SUBSCRIPT:
+            features["has_index_access"] = True
+
+        elif node.type in (_CPP_FOR_STMT, _CPP_WHILE_STMT,
+                           _CPP_DO_STMT, _CPP_RANGE_FOR):
+            features["has_iteration"] = True
+
+        elif node.type == _CPP_NEW_EXPR:
+            features["has_new_delete"] = True
+            features["is_pure"] = False
+
+        elif node.type == _CPP_DELETE_EXPR:
+            features["has_new_delete"] = True
+
+        elif node.type == "pointer_expression":
+            features["has_raw_pointer"] = True
+
+        # 递归子节点
+        for child in node.children:
+            self._detect_recursive(child, source_bytes, func_name, features)
+
+    def _check_call_features(self, call_node, source_bytes: bytes,
+                             features: dict, func_name: str):
+        """分析函数调用表达式的特征。"""
+        func_node = call_node.child_by_field_name("function")
+        if not func_node:
+            return
+
+        call_text = self._node_text(func_node, source_bytes)
+
+        # 递归检测
+        if call_text == func_name:
+            features["has_recursion"] = True
+
+        # STL 数学
+        if any(fn in call_text for fn in (
+            "std::abs", "std::sqrt", "std::pow", "std::sin",
+            "std::cos", "std::tan", "std::log", "std::exp",
+            "std::ceil", "std::floor", "std::round",
+        )):
+            features["uses_stl_math"] = True
+
+        # STL 算法
+        if any(fn in call_text for fn in (
+            "std::sort", "std::stable_sort", "std::partial_sort",
+            "std::find", "std::find_if", "std::transform",
+            "std::accumulate", "std::count", "std::remove",
+        )):
+            features["uses_stl_algo"] = True
+            if "sort" in call_text:
+                features["has_sort"] = True
+
+        # 文件 IO
+        if any(fn in call_text for fn in (
+            "std::fstream", "std::ifstream", "std::ofstream",
+            "fopen", "fclose", "fread", "fwrite",
+        )):
+            features["has_file_io"] = True
+            features["is_pure"] = False
+
+        # 网络
+        if any(fn in call_text for fn in (
+            "boost::asio", "curl_", "socket", "connect", "send", "recv",
+        )):
+            features["has_network"] = True
+            features["is_pure"] = False
+
+        # 智能指针
+        if any(fn in call_text for fn in (
+            "std::make_unique", "std::make_shared",
+            "std::unique_ptr", "std::shared_ptr", "std::weak_ptr",
+        )):
+            features["uses_smart_ptr"] = True
+
+        # 子进程
+        if any(fn in call_text for fn in ("system", "popen", "exec")):
+            features["has_subprocess"] = True
+            features["is_pure"] = False
+
+        # printf 系列
+        if any(fn in call_text for fn in (
+            "printf", "sprintf", "snprintf", "fprintf",
+        )):
+            features["has_printf"] = True
+
+        # SQL
+        if any(fn in call_text for fn in (
+            "sqlite3_", "mysql_", "PQ", "sqlite::",
+        )):
+            features["has_sql_ops"] = True
+            features["is_pure"] = False
+
+        # 缓冲区操作
+        if any(fn in call_text for fn in (
+            "memcpy", "strcpy", "strcat", "memmove", "strncpy",
+        )):
+            features["has_buffer_op"] = True
+
+        # 字符串方法
+        if any(fn in call_text for fn in (
+            ".substr", ".find", ".replace", ".c_str",
+            ".append", ".insert", ".erase", ".compare",
+        )):
+            features["has_str_ops"] = True
+
+        # 容器增长
+        if any(fn in call_text for fn in (
+            "push_back", "emplace_back", "insert",
+        )):
+            features["has_container_growth"] = True
+
+        # 移动语义
+        if "std::move" in call_text:
+            features["has_move_semantics"] = True
+
+        # 通过检查参数类型推断浮点
+        if any(t in call_text for t in ("float", "double")):
+            features["has_float_type"] = True
+
+    @staticmethod
+    def decide_dimensions(features: dict) -> list[str]:
+        dims = ["functional", "boundary"]
+
+        if (features.get("has_try") or features.get("has_throw")
+                or features.get("has_file_io") or features.get("has_network")):
+            dims.append("exception")
+
+        if (features.get("has_numeric_op") or features.get("uses_stl_math")
+                or features.get("has_float_type")):
+            dims.append("data_integrity")
+
+        if (features.get("has_sort") or features.get("has_recursion")
+                or features.get("has_template")
+                or features.get("has_new_delete")
+                or features.get("has_container_growth")):
+            dims.append("performance")
+
+        if (features.get("has_subprocess") or features.get("has_buffer_op")
+                or features.get("has_sql_ops") or features.get("has_printf")
+                or features.get("has_raw_pointer") or features.get("has_shell_format")):
+            dims.append("security")
+
+        return dims
+
+    @staticmethod
+    def decide_mocks(features: dict, class_name: str | None) -> list[dict]:
+        mocks = []
+        if features.get("has_file_io"):
+            mocks.append({
+                "type": "file_io",
+                "suggestion": "使用 temp_directory_path 或 mock IFileReader 接口",
+            })
+        if features.get("has_network"):
+            mocks.append({
+                "type": "network",
+                "suggestion": "mock IHttpClient 接口",
+            })
+        if features.get("has_subprocess"):
+            mocks.append({
+                "type": "subprocess",
+                "suggestion": "mock IProcessRunner 接口",
+            })
+        if features.get("has_sql_ops"):
+            mocks.append({
+                "type": "database",
+                "suggestion": "mock IDatabase 接口或使用内存 SQLite",
+            })
+        return mocks
+
+    # C++ 辅助方法
+
+    @staticmethod
+    def _node_text(node, source_bytes: bytes) -> str:
+        if node is None:
+            return ""
+        return source_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
+
+    @staticmethod
+    def _find_child(node, type_name: str):
+        for child in node.children:
+            if child.type == type_name:
+                return child
+        return None
+
+    def _extract_func_name(self, declarator, source_bytes: bytes) -> str:
+        """从 function_declarator 提取函数名。"""
+        # 处理 field_identifier (类方法) 和 identifier (自由函数)
+        for child in declarator.children:
+            if child.type in ("identifier", "field_identifier",
+                              "destructor_name", "operator_name"):
+                return self._node_text(child, source_bytes)
+            if child.type == "qualified_identifier":
+                # ns::func 的情况，取最后一段
+                parts = self._node_text(child, source_bytes).split("::")
+                return parts[-1] if parts else ""
+            if child.type == "template_function":
+                return self._node_text(child, source_bytes)
+            # 递归嵌套的 declarator
+            if child.type == _CPP_FUNC_DECL:
+                return self._extract_func_name(child, source_bytes)
+        return ""
+
+    def _build_signature(self, func_node, declarator,
+                         source_bytes: bytes) -> str:
+        """构建函数签名字符串。"""
+        # 返回类型
+        ret_type = ""
+        for child in func_node.children:
+            if child.type == _CPP_TYPE_DESC:
+                ret_type = self._node_text(child, source_bytes)
+                break
+
+        # 函数名和参数
+        decl_text = self._node_text(declarator, source_bytes)
+
+        # cv 限定符
+        cv = ""
+        # 从函数定义的直接子节点找 qualifier
+        for child in func_node.children:
+            if child.type == "type_qualifier":
+                cv = " " + self._node_text(child, source_bytes)
+
+        return f"{ret_type} {decl_text}{cv}".strip()
 
 
 # ---------------------------------------------------------------------------
-# 主流程
+# 分析器工厂
+# ---------------------------------------------------------------------------
+
+def get_analyzer(ext: str) -> LanguageAnalyzer | None:
+    """根据文件扩展名返回对应的语言分析器。"""
+    if ext in PY_EXTENSIONS:
+        return PythonAnalyzer()
+    if ext in CPP_EXTENSIONS:
+        if not _TS_AVAILABLE:
+            return None  # 跳过 C++ 文件（缺少依赖）
+        return CppAnalyzer()
+    return None
+
+
+# ---------------------------------------------------------------------------
+# 语言和框架检测
 # ---------------------------------------------------------------------------
 
 def detect_language_and_framework(repo_root: Path) -> dict:
     """检测语言和测试框架。"""
     result = {"languages": [], "test_frameworks": {}}
 
-    # 检测 Python
     has_py = any(repo_root.rglob("*.py"))
     if has_py:
         result["languages"].append("python")
-        # 默认 pytest；后续可从 pyproject.toml 等读出精确信息
         result["test_frameworks"]["python"] = "pytest"
 
-    # 检测 C++ (预留)
-    has_cpp = any(repo_root.rglob("*.cpp")) or any(repo_root.rglob("*.hpp"))
+    has_cpp = (
+        any(repo_root.rglob("*.cpp"))
+        or any(repo_root.rglob("*.cc"))
+        or any(repo_root.rglob("*.cxx"))
+        or any(repo_root.rglob("*.hpp"))
+    )
     if has_cpp:
         result["languages"].append("cpp")
-        # 预留：根据 CMakeLists 判断 gtest/catch2
         result["test_frameworks"]["cpp"] = "gtest"
 
     return result
 
 
+# ---------------------------------------------------------------------------
+# 文件遍历
+# ---------------------------------------------------------------------------
+
 def walk_sources(repo_root: Path, source_dirs: list[str] | None) -> list[Path]:
-    """遍历源码目录，返回所有应扫描的 .py 文件。"""
+    """遍历源码目录，返回所有应扫描的源文件（Python + C++）。"""
     if source_dirs:
         roots = [repo_root / d for d in source_dirs]
     else:
@@ -500,12 +970,10 @@ def walk_sources(repo_root: Path, source_dirs: list[str] | None) -> list[Path]:
             continue
         for dirpath, dirnames, filenames in os.walk(root):
             dirpath_obj = Path(dirpath)
-            # 剔除要跳过的子目录
             dirnames[:] = [
                 d for d in dirnames
                 if not should_skip_dir(dirpath_obj / d, repo_root)
             ]
-            # 不扫描 test/generated_unit 自身
             rel = dirpath_obj.relative_to(repo_root)
             if str(rel).startswith("test/generated_unit") or str(rel).startswith(
                 "test\\generated_unit"
@@ -520,9 +988,11 @@ def walk_sources(repo_root: Path, source_dirs: list[str] | None) -> list[Path]:
     return sorted(files)
 
 
-def compare_with_baseline(
-    current: dict, baseline_path: Path | None
-) -> dict:
+# ---------------------------------------------------------------------------
+# 基线对比
+# ---------------------------------------------------------------------------
+
+def compare_with_baseline(current: dict, baseline_path: Path | None) -> dict:
     """与 test_cases.json 基线对比，标注变更。"""
     if not baseline_path or not baseline_path.is_file():
         return {
@@ -553,8 +1023,8 @@ def compare_with_baseline(
     changed_files = []
     new_files = []
     removed_files = []
-    changed_functions = {}  # filepath -> [func_key, ...]
-    unchanged_functions = {}  # filepath -> [func_key, ...]
+    changed_functions = {}
+    unchanged_functions = {}
 
     for fpath, finfo in current_files.items():
         if fpath not in baseline_files:
@@ -565,12 +1035,10 @@ def compare_with_baseline(
 
         baseline_finfo = baseline_files[fpath]
         if baseline_finfo.get("file_md5") == finfo["file_md5"]:
-            # 文件未变
             unchanged_functions[fpath] = list(finfo["functions"].keys())
             continue
 
         changed_files.append(fpath)
-        # 按函数粒度对比
         baseline_funcs = baseline_finfo.get("functions", {})
         cur_funcs = finfo["functions"]
         changed_functions[fpath] = []
@@ -597,9 +1065,13 @@ def compare_with_baseline(
     }
 
 
+# ---------------------------------------------------------------------------
+# 主流程
+# ---------------------------------------------------------------------------
+
 def main():
     parser = argparse.ArgumentParser(
-        description="扫描仓库提取可测试函数",
+        description="扫描仓库提取可测试函数（支持 Python 和 C++）",
     )
     parser.add_argument("repo_root", help="仓库根目录")
     parser.add_argument("--source", default=None,
@@ -617,10 +1089,13 @@ def main():
     if args.source:
         source_dirs = [s.strip() for s in args.source.split(",") if s.strip()]
 
-    # 检测语言/框架
     lang_info = detect_language_and_framework(repo_root)
 
-    # 扫描所有 .py 文件
+    if "cpp" in lang_info["languages"] and not _TS_AVAILABLE:
+        print("警告: 检测到 C++ 文件但缺少 tree-sitter 依赖，"
+              "C++ 文件将被跳过。安装: pip install tree-sitter tree-sitter-cpp",
+              file=sys.stderr)
+
     files = walk_sources(repo_root, source_dirs)
 
     result = {
@@ -631,11 +1106,15 @@ def main():
     }
 
     for fpath in files:
-        finfo = extract_functions_from_file(fpath, repo_root)
-        if finfo.get("functions"):  # 只保留有函数的文件
+        ext = fpath.suffix.lower()
+        analyzer = get_analyzer(ext)
+        if analyzer is None:
+            continue
+
+        finfo = analyzer.extract_functions(fpath, repo_root)
+        if finfo.get("functions"):
             result["files"][str(fpath.relative_to(repo_root))] = finfo
 
-    # 汇总
     total_functions = sum(
         len(f["functions"]) for f in result["files"].values()
     )
@@ -644,7 +1123,6 @@ def main():
         "total_functions": total_functions,
     }
 
-    # 基线对比
     baseline_path = Path(args.baseline) if args.baseline else None
     result["incremental"] = compare_with_baseline(result, baseline_path)
 
