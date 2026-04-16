@@ -1,17 +1,30 @@
 # code-wiki
 
-Claude Code skills + agents 分发包，包含两个 skill：
+Claude Code skills + agents 分发包。
+
+## Skills 概览
+
+### 核心 Skills（默认安装）
 
 - **code-wiki**：为任意代码仓库增量构建中文 wiki，帮助理解和重构代码
 - **module-test-gen**：半自动化的模块级测试生成工具，扫描代码仓库、生成配置、运行测试
 
+### 可选 Skills（`--full` 安装）
+
+- **unit-test-gen**：单元测试生成工具，支持 Python（pytest）和 C++（Google Test）
+- **paper-code-deepdive**：论文-代码深度对比分析工具，四阶段流水线定位论文创新点并与代码实现逐项对比
+
 ## 安装
 
 ```bash
+# 安装核心 skills（code-wiki、module-test-gen）
 ./install.sh /path/to/target/project
+
+# 安装全部 skills（含可选 skill）
+./install.sh --full /path/to/target/project
 ```
 
-安装完成后，目标项目的 `.claude/skills/` 下会包含两个 skill，通过 Claude Code 调用对应命令即可启动。
+安装完成后，目标项目的 `.claude/skills/` 下会包含对应 skill，通过 Claude Code 调用命令即可启动。
 
 ## 使用
 
@@ -66,6 +79,17 @@ test-config/
 └── reports/            # 测试报告（markdown）
 ```
 
+### paper-code-deepdive（可选）
+
+配对论文与开源代码进行深度对比分析。四阶段流水线：
+
+1. **Stage 1**：从论文 PDF 定位核心创新点（使用 `extract_innovations.py`）
+2. **Stage 2**：分析论文材料——文本、公式、图表三源交叉验证（使用 `analyze_figures.py`）
+3. **Stage 3**：在代码仓库中定位实现（使用 `locate_implementation.py`）
+4. **Stage 4**：深度对比出报告，揭示论文未提及的实现细节（使用 `deep_compare.py`）
+
+适用场景：想复现某篇论文、怀疑代码与论文不一致、或想深入了解"代码实际做了什么"。
+
 ## 反向同步
 
 如果在目标项目中修改了 skill/agent 文件，可以同步回本仓库：
@@ -78,17 +102,26 @@ test-config/
 
 ```
 code-wiki/
-├── install.sh                # 安装脚本
+├── install.sh                # 安装脚本（--full 安装可选 skills）
 ├── sync_from_project.sh      # 反向同步脚本
 ├── skills/
-│   ├── code-wiki/            # 中文 wiki 构建技能
+│   ├── code-wiki/            # 中文 wiki 构建技能 [核心]
 │   │   ├── SKILL.md
 │   │   ├── references/       # 各子命令工作流指南
 │   │   └── scripts/scan.py   # 增量扫描器（纯 Python，无第三方依赖）
-│   └── module-test-gen/      # 模块测试生成技能
+│   ├── module-test-gen/      # 模块测试生成技能 [核心]
+│   │   ├── SKILL.md
+│   │   ├── references/       # 语言特定的扫描和生成规则
+│   │   ├── scripts/          # 扫描、生成、运行脚本（依赖 pyyaml）
+│   │   └── templates/        # 配置文件模板
+│   ├── unit-test-gen/        # 单元测试生成技能 [可选]
+│   │   ├── SKILL.md
+│   │   ├── references/
+│   │   └── scripts/
+│   └── paper-code-deepdive/  # 论文-代码深度对比 [可选]
 │       ├── SKILL.md
-│       ├── references/       # 语言特定的扫描和生成规则
-│       ├── scripts/          # 扫描、生成、运行脚本（依赖 pyyaml）
-│       └── templates/        # 配置文件模板
+│       ├── references/       # 创新点识别、图表分析、隐藏细节清单、报告模板
+│       ├── scripts/          # 四阶段脚本（依赖 pdfplumber/pymupdf）
+│       └── examples/         # Flamingo 完整示例
 └── agents/                   # 按语言拆分的 sub-agent（code-wiki 专用）
 ```

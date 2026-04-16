@@ -4,11 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目简介
 
-code-wiki 是一个 Claude Code skills + agents 分发包，包含两个 skill：
+code-wiki 是一个 Claude Code skills + agents 分发包，包含以下 skill：
+
+核心（默认安装）：
 - **code-wiki**：为任意代码仓库增量构建和维护中文 wiki
 - **module-test-gen**：半自动化的模块级测试生成工具
 
-本仓库本身**不是**最终运行的项目，而是一个安装源：通过 `install.sh` 将所有 skills 和 agents 安装到目标项目的 `.claude/` 目录下。
+可选（`install.sh --full` 安装）：
+- **unit-test-gen**：单元测试生成工具，支持 Python（pytest）和 C++（Google Test）
+- **paper-code-deepdive**：论文-代码深度对比分析工具（四阶段流水线：定位创新点 → 分析论文材料 → 定位代码实现 → 深度对比出报告）
+
+本仓库本身**不是**最终运行的项目，而是一个安装源：通过 `install.sh`（核心）或 `install.sh --full`（全部）将 skills 和 agents 安装到目标项目的 `.claude/` 目录下。
 
 ## 常用命令
 
@@ -71,6 +77,21 @@ code-wiki/                        ← 安装源仓库（本仓库）
 │       └── templates/
 │           ├── index-template.yml          ← index.yml 参考模板
 │           └── module-config-template.yml  ← 模块配置参考模板
+│   └── paper-code-deepdive/       ← 论文-代码深度对比分析技能
+│       ├── SKILL.md               ← 四阶段流水线（定位创新→分析材料→定位代码→对比报告）
+│       ├── references/
+│       │   ├── innovation_signals.md          ← 创新点识别启发式
+│       │   ├── figure_analysis_protocol.md    ← 三源交叉验证协议
+│       │   ├── figure_schemas.md              ← 5 种图类型结构化 schema
+│       │   ├── hidden_details_checklist.md    ← 12 类"论文不写但代码里有"的清单
+│       │   └── report_template.md             ← 最终报告模板
+│       ├── scripts/
+│       │   ├── extract_innovations.py   ← Stage 1: 从 PDF 抽取高信号区域
+│       │   ├── analyze_figures.py       ← Stage 2c: 图渲染 + 三源提取
+│       │   ├── locate_implementation.py ← Stage 3: 代码仓库定向 grep
+│       │   └── deep_compare.py          ← Stage 4: 组装对比报告骨架
+│       └── examples/
+│           └── flamingo_gated_xattn.md  ← Flamingo Gated Xattn 完整示例
 └── agents/                       ← 按语言拆分的 sub-agent（code-wiki 专用）
     ├── code-wiki-python-scanner.md   ← Python 文件扫描
     ├── code-wiki-cpp-scanner.md      ← C/C++ 文件扫描
@@ -116,6 +137,13 @@ code-wiki/                        ← 安装源仓库（本仓库）
 - **init → generate → run 工作流分离**：三步独立执行，每步之间工程师必须有机会审查
 - **增量更新**：`init` 对已有配置做增量更新，不删除 manual 条目，对消失的 auto 条目标记 STALE
 - **报告按模块生成**：每个模块独立的测试报告，index.yml 指向各报告
+
+### paper-code-deepdive
+- **四阶段流水线**：Stage 1 定位创新点 → Stage 2 分析论文材料（文本+公式+图表三源交叉验证）→ Stage 3 定位代码实现 → Stage 4 深度对比出报告
+- **脚本做机械工作，判断留给 LLM**：四个脚本负责 PDF 解析、文件遍历、grep 等确定性工作，识别创新点、填充 schema、写对比报告由 Claude 完成
+- **Stage 1 后必须停下确认**：避免分析错误的"创新点"浪费后续工作
+- **hidden_details_checklist**：12 大类（初始化、归一化、激活、注意力细节、dropout、数值稳定、训练/推理分支、loss 细节、优化器、数据、精度、显式差异），是复现失败原因的系统性清单
+- **脚本依赖**：`pdfplumber` 或 `pypdf`（Stage 1/2c），`pymupdf`（Stage 2c 图渲染），Stage 3/4 仅标准库
 
 ## 修改注意事项
 
