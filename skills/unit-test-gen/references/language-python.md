@@ -480,7 +480,7 @@ python -m pytest test/generated_unit/ -v --tb=short
 
 ### 增量模式执行
 
-从 `testcases.json` 读出变更过的文件列表，只跑对应测试：
+从 `test_cases.json` 读出变更过的文件列表，只跑对应测试：
 
 ```bash
 python -m pytest \

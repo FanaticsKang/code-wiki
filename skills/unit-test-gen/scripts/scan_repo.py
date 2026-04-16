@@ -6,7 +6,7 @@ scan_repo.py — 扫描 Python 代码仓库，提取所有可测试函数。
 Claude 读取此输出后决定生成哪些 pytest 测试用例。
 
 用法：
-    python scan_repo.py <repo_root> [--source core,utils] [--baseline testcases.json]
+    python scan_repo.py <repo_root> [--source core,utils] [--baseline test_cases.json]
 
 如果提供 --baseline，输出中会包含与基线对比的变更信息。
 """
@@ -523,7 +523,7 @@ def walk_sources(repo_root: Path, source_dirs: list[str] | None) -> list[Path]:
 def compare_with_baseline(
     current: dict, baseline_path: Path | None
 ) -> dict:
-    """与 testcases.json 基线对比，标注变更。"""
+    """与 test_cases.json 基线对比，标注变更。"""
     if not baseline_path or not baseline_path.is_file():
         return {
             "is_incremental": False,
@@ -605,7 +605,7 @@ def main():
     parser.add_argument("--source", default=None,
                         help="限定扫描的目录，逗号分隔")
     parser.add_argument("--baseline", default=None,
-                        help="基线 testcases.json 路径（用于增量对比）")
+                        help="基线 test_cases.json 路径（用于增量对比）")
     args = parser.parse_args()
 
     repo_root = Path(args.repo_root).resolve()

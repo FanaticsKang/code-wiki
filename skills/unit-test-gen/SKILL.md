@@ -5,7 +5,7 @@ description: >
   （功能性/边界/异常容错/数据完整性/性能/安全）动态生成 pytest 测试用例、执行并输出报告。
   当用户提到"单元测试"、"生成测试"、"测试覆盖率"、"pytest"、"增量测试"、
   "回归测试"、"unit test"、"跑测试"、"给函数加测试"、"哪些函数没被测试"时触发。
-  当用户提及 test/generated_unit/ 目录或 testcases.json 基线文件时也应触发。
+  当用户提及 test/generated_unit/ 目录或 test_cases.json 基线文件时也应触发。
   此技能是全自动的：扫描仓库 → 分析函数 → 生成测试代码 → 运行并出报告，
   默认不需要人工干预。支持全量和增量两种模式，增量模式通过 MD5 哈希检测变更
   只重测受影响的函数。当前支持 Python + pytest，架构预留 C++ + googletest。
@@ -25,7 +25,7 @@ review 的配置文件，直接生成可运行的测试代码。
 
 | 命令 | 作用 |
 |------|------|
-| `init` | 扫描源码、分析函数、生成/更新 `testcases.json` 基线 |
+| `init` | 扫描源码、分析函数、生成/更新 `test_cases.json` 基线 |
 | `generate` | 读取基线，生成 pytest 测试代码到 `test/generated_unit/` |
 | `run` | 执行测试，生成 markdown 报告 |
 | `auto` | **一键模式**：自动串联 `init → generate → run` |
@@ -58,7 +58,7 @@ review 的配置文件，直接生成可运行的测试代码。
 
 ```
 test/generated_unit/
-├── testcases.json              # 基线文件（元数据 + MD5，不含测试代码）
+├── test_cases.json              # 基线文件（元数据 + MD5，不含测试代码）
 ├── _helpers.py                 # 共享工具函数
 ├── report.md                   # 测试报告
 ├── core/
@@ -93,7 +93,7 @@ test/generated_unit/
 | 框架 | `pyproject.toml`、`requirements.txt`、`CMakeLists.txt` | pytest |
 | 混合仓库 | 按扩展名分组，支持多语言并存 | 单语言优先 |
 
-检测结果写入 `testcases.json` 的 `languages` 和 `test_frameworks` 字段。
+检测结果写入 `test_cases.json` 的 `languages` 和 `test_frameworks` 字段。
 
 ---
 
@@ -229,7 +229,7 @@ test/generated_unit/
 ### `init` 命令
 
 1. **解析参数**：`--mode`（默认 incremental）、`--source`（默认全仓库）。
-2. **检查基线**：读取 `test/generated_unit/testcases.json`。
+2. **检查基线**：读取 `test/generated_unit/test_cases.json`。
    - 不存在或解析失败 → 提示"未检测到基线，自动退化为全量模式"，切换 `full`。
 3. **扫描源码**：
    - 应用排除规则 + `--source` 限定范围。
@@ -245,7 +245,7 @@ test/generated_unit/
    - 函数 MD5 变化或新增 → 标记为需要重新生成。
    - 基线中存在但扫描未发现的函数 → 标记为删除。
 6. **分析函数行为**：对需要重新生成的函数做 AST 特征分析，判定适用的测试维度。
-7. **写入 `testcases.json`**：只存元数据（签名、MD5、维度、测试 case 描述），
+7. **写入 `test_cases.json`**：只存元数据（签名、MD5、维度、测试 case 描述），
    不存测试代码。
 
 大仓库策略：如果扫描到超过 30 个源文件，考虑按文件分批处理（Claude 自行决定
@@ -253,12 +253,12 @@ test/generated_unit/
 
 ### `generate` 命令
 
-1. **读取 `testcases.json`**。
+1. **读取 `test_cases.json`**。
 2. **生成 `_helpers.py`**（如果不存在或技能版本升级）。
 3. **为每个文件生成测试**：
    - 计算输出路径（镜像源码目录结构）。
    - 创建必要的 `__init__.py` 和父目录。
-   - 按 `testcases.json` 中的 case 描述，生成对应的 pytest 函数。
+   - 按 `test_cases.json` 中的 case 描述，生成对应的 pytest 函数。
    - 加上 AUTO-GENERATED 文件头注释。
 4. **生成测试代码时的具体要求**：
    - 正确设置 `sys.path` 或使用相对导入（视项目结构而定）。
@@ -286,7 +286,7 @@ test/generated_unit/
 
 ---
 
-## `testcases.json` 结构
+## `test_cases.json` 结构
 
 只存元数据和 MD5，**不存测试代码**（测试代码只在 `.py` 文件里）。
 

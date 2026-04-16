@@ -5,7 +5,7 @@ run_and_report.py — 执行 pytest 并生成 markdown 报告。
 用法：
     python run_and_report.py [--test-dir test/generated_unit/] \
         [--output test/generated_unit/report.md] \
-        [--testcases test/generated_unit/testcases.json] \
+        [--testcases test/generated_unit/test_cases.json] \
         [--mode incremental|full] \
         [--only <file1> <file2> ...]
 
@@ -83,7 +83,7 @@ def extract_failure_blocks(output: str) -> dict[str, str]:
 
 
 def load_testcases(path: Path) -> dict:
-    """读取 testcases.json。"""
+    """读取 test_cases.json。"""
     if not path.is_file():
         return {}
     try:
@@ -94,7 +94,7 @@ def load_testcases(path: Path) -> dict:
 
 
 def find_function_for_test(test_nodeid: str, testcases: dict) -> dict | None:
-    """根据 test nodeid 反查对应的函数信息（来自 testcases.json）。"""
+    """根据 test nodeid 反查对应的函数信息（来自 test_cases.json）。"""
     # test nodeid 形如 test/generated_unit/core/test_parser.py::test_parse_header_functional_normal
     # 或 test/generated_unit/core/test_parser.py::TestParser::test_parser_parse_functional_normal
     parts = test_nodeid.split("::")
@@ -102,7 +102,7 @@ def find_function_for_test(test_nodeid: str, testcases: dict) -> dict | None:
         return None
 
     test_file = parts[0]
-    # testcases.json 里的 test_path 是相对路径
+    # test_cases.json 里的 test_path 是相对路径
     for src_path, finfo in testcases.get("files", {}).items():
         if finfo.get("test_path") == test_file:
             # 匹配函数
@@ -255,8 +255,8 @@ def main():
     )
     parser.add_argument(
         "--testcases",
-        default="test/generated_unit/testcases.json",
-        help="testcases.json 路径",
+        default="test/generated_unit/test_cases.json",
+        help="test_cases.json 路径",
     )
     parser.add_argument(
         "--mode",
@@ -283,7 +283,7 @@ def main():
     testcases_path = Path(args.testcases)
     testcases = load_testcases(testcases_path)
 
-    # 从 testcases.json 读增量信息
+    # 从 test_cases.json 读增量信息
     incremental_info = None
     if args.mode == "incremental" and testcases:
         incremental_info = testcases.get("incremental")
