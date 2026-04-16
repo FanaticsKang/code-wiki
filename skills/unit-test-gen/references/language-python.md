@@ -1,6 +1,7 @@
 # Python 语言参考 — 单元测试生成器
 
-本文档详细说明 Python 代码的扫描规则、函数分析方法、以及 pytest 测试代码的生成规范。
+本文档详细说明 Python 代码的扫描规则、函数分析方法、pytest 测试代码的生成规范。
+是 SKILL.md 中通用流程的 Python/pytest 特定实现。
 
 ---
 
@@ -89,7 +90,7 @@
 
 根据特征标记组合判定适用维度：
 
-```
+```python
 dimensions = ["functional", "boundary"]   # 必选
 
 if has_try or has_raise or has_file_io or has_network:
@@ -99,11 +100,131 @@ if has_numeric_op or uses_math or uses_numpy or has_float_type:
     dimensions.append("data_integrity")
 ```
 
+---
+
+## 各维度的 pytest 测试策略
+
+### 功能性测试
+
+- 正向路径：标准输入 → 预期输出
+- 等价类划分：有效等价类和无效等价类各选一个代表值
+
+```python
+def test_parse_header_functional_normal():
+    """标准 bytes 输入返回正确的 Header 对象"""
+    data = b"\\x01\\x02\\x03\\x04" + b"\\x00" * 60
+    result = parse_header(data)
+    assert isinstance(result, Header)
+    assert result.version == 1
+    assert result.length == 64
+```
+
+### 边界测试
+
+使用 `BOUNDARY_VALUES`（定义在 `_helpers.py`）和 `@pytest.mark.parametrize`：
+
+```python
+@pytest.mark.parametrize("empty_input", [b"", bytes(), bytearray()])
+def test_parse_header_boundary_empty_bytes(empty_input):
+    """空字节序列应抛出 ValueError"""
+    with pytest.raises(ValueError):
+        parse_header(empty_input)
+
+
+@pytest.mark.parametrize("value", BOUNDARY_VALUES["int"])
+def test_compute_rate_boundary_int(value):
+    """各种边界整数值应得到合理输出"""
+    result = compute_rate(value)
+    assert isinstance(result, (int, float))
+```
+
+边界值查表（`_helpers.BOUNDARY_VALUES`）：
+
+| 类型 | 边界值 |
+|------|--------|
+| `int` | `0`, `-1`, `1`, `sys.maxsize`, `-sys.maxsize-1` |
+| `float` | `0.0`, `inf`, `-inf`, `nan`, `1e-308`, `1e308` |
+| `str` | `""`, `" "`, `"中文"`, `"\x00"`, `"a" * 10000` |
+| `list`/`dict`/`set` | 空集合、单元素、嵌套空 |
+| `Optional[T]` | `None` |
+
+### 异常容错测试
+
+- 非法输入类型 → `pytest.raises(TypeError)`
+- 越界值 → `pytest.raises(ValueError)`
+- 模拟 IO 失败（`FileNotFoundError`、`PermissionError`）
+- 模拟网络失败（超时、404、500）
+
+```python
+def test_parse_header_exception_truncated():
+    """截断的数据应抛出明确的 ValueError"""
+    truncated = b"\\x01\\x02"  # 预期 64 字节
+    with pytest.raises(ValueError, match="truncated|length"):
+        parse_header(truncated)
+
+
+def test_load_config_exception_file_not_found(tmp_path):
+    """配置文件不存在时应抛出 FileNotFoundError"""
+    with pytest.raises(FileNotFoundError):
+        load_config(tmp_path / "nonexistent.yaml")
+
+
+@patch("requests.get")
+def test_fetch_user_exception_timeout(mock_get):
+    """网络超时时应抛出 TimeoutError"""
+    mock_get.side_effect = TimeoutError("timeout")
+    with pytest.raises(TimeoutError):
+        fetch_user(123)
+```
+
+### 数据完整性测试
+
+**精度验证**：
+```python
+def test_compute_rate_data_integrity_precision():
+    """浮点运算结果应在容差范围内"""
+    result = compute_rate(0.1, 0.2)
+    assert_approx(result, 0.3, tol=1e-9)
+```
+
+**确定性验证**：
+```python
+def test_format_id_data_integrity_deterministic():
+    """纯函数多次调用结果一致"""
+    assert_deterministic(format_id, "user", 42, runs=5)
+```
+
+**往返验证**：
+```python
+def test_encode_decode_data_integrity_roundtrip():
+    """encode 后 decode 应还原原值"""
+    for original in [{"a": 1}, [], "hello", 3.14]:
+        assert decode(encode(original)) == original
+```
+
+---
+
+## Mock 实现细节（Python）
+
+### Mock 外部边界的具体实现
+
+| 依赖类型 | Mock 方式 |
+|----------|-----------|
+| 文件读取 | `pytest` 的 `tmp_path` fixture 构造真实临时文件；或 `patch("builtins.open", mock_open(...))` |
+| 配置加载 | `patch("yaml.safe_load", return_value={...})` |
+| 数据库/ORM | `patch("module.db_client", MagicMock())` |
+| 网络请求 | `patch("requests.get", return_value=mock_response(...))` |
+| 类方法 | `MagicMock(spec=Class)` |
+| numpy/pyarrow | 直接使用真实库（纯数据变换，无副作用） |
+| 异步函数 | `call_async(coro)` 包装，或 `pytest-asyncio` |
+
+**纯数据变换永远不需要 mock**：numpy 操作、字符串处理、数值计算等直接构造输入调用即可。
+
 ### Mock 需求判定
 
 扫描同时输出 mock 建议：
 
-```
+```python
 mocks_needed = []
 if has_file_io:
     mocks_needed.append(("file_io", "use tmp_path fixture or patch open()"))
@@ -165,86 +286,6 @@ from src.core.parser import parse_header, Header  # 被测代码
 - `test_compute_rate_data_integrity_precision`
 
 类方法命名：`test_<类名小写>_<方法名>_<维度>_<描述>`
-
-### 功能性测试模板
-
-```python
-def test_parse_header_functional_normal():
-    """标准 bytes 输入返回正确的 Header 对象"""
-    data = b"\\x01\\x02\\x03\\x04" + b"\\x00" * 60
-    result = parse_header(data)
-    assert isinstance(result, Header)
-    assert result.version == 1
-    assert result.length == 64
-```
-
-### 边界测试模板
-
-使用 `BOUNDARY_VALUES` 和 `parametrize`：
-
-```python
-@pytest.mark.parametrize("empty_input", [b"", bytes(), bytearray()])
-def test_parse_header_boundary_empty_bytes(empty_input):
-    """空字节序列应抛出 ValueError"""
-    with pytest.raises(ValueError):
-        parse_header(empty_input)
-
-
-@pytest.mark.parametrize("value", BOUNDARY_VALUES["int"])
-def test_compute_rate_boundary_int(value):
-    """各种边界整数值应得到合理输出"""
-    result = compute_rate(value)
-    assert isinstance(result, (int, float))
-```
-
-### 异常容错测试模板
-
-```python
-def test_parse_header_exception_truncated():
-    """截断的数据应抛出明确的 ValueError"""
-    truncated = b"\\x01\\x02"  # 预期 64 字节
-    with pytest.raises(ValueError, match="truncated|length"):
-        parse_header(truncated)
-
-
-def test_load_config_exception_file_not_found(tmp_path):
-    """配置文件不存在时应抛出 FileNotFoundError"""
-    with pytest.raises(FileNotFoundError):
-        load_config(tmp_path / "nonexistent.yaml")
-
-
-@patch("requests.get")
-def test_fetch_user_exception_timeout(mock_get):
-    """网络超时时应抛出 TimeoutError"""
-    mock_get.side_effect = TimeoutError("timeout")
-    with pytest.raises(TimeoutError):
-        fetch_user(123)
-```
-
-### 数据完整性测试模板
-
-**精度验证**：
-```python
-def test_compute_rate_data_integrity_precision():
-    """浮点运算结果应在容差范围内"""
-    result = compute_rate(0.1, 0.2)
-    assert_approx(result, 0.3, tol=1e-9)
-```
-
-**确定性验证**：
-```python
-def test_format_id_data_integrity_deterministic():
-    """纯函数多次调用结果一致"""
-    assert_deterministic(format_id, "user", 42, runs=5)
-```
-
-**往返验证**：
-```python
-def test_encode_decode_data_integrity_roundtrip():
-    """encode 后 decode 应还原原值"""
-    for original in [{"a": 1}, [], "hello", 3.14]:
-        assert decode(encode(original)) == original
-```
 
 ### 异步函数测试模板
 
