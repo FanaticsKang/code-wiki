@@ -1,9 +1,10 @@
 ---
 name: code-wiki
 description: |
-  为代码仓库增量构建和维护一个中文 wiki（位于仓库内的 ./wiki/ 目录），用来帮助理解和重构代码。
-  当用户希望"理解这个代码仓库"、"梳理这个项目的架构"、"给这个项目生成文档/wiki"、"帮我读懂这个项目的代码"时，务必使用本 skill。即使用户没有直接说 "wiki" 这个词，只要意图是系统性地理解一个已有代码仓库、梳理其架构与数据流、或为重构做前期准备，都应该触发本 skill。
-  Subcommands: init, scan, query, lint.
+  为代码仓库增量构建中文 wiki（./wiki/ 目录），梳理架构、数据流，辅助理解和重构。
+  触发词：理解代码仓库、梳理架构、生成文档/wiki、读懂代码、分析项目结构。
+  即使未提及"wiki"，只要意图是系统性理解代码仓库或为重构做准备，都应触发。
+  命令：init, scan, query, lint。
 argument-hint: "init | scan | query | lint"
 allowed-tools:
   - Bash

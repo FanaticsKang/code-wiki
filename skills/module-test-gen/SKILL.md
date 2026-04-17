@@ -1,13 +1,10 @@
 ---
 name: module-test-gen
 description: >
-  生成并运行模块级（集成）测试。当用户提到模块测试、集成测试、生成测试配置、扫描代码仓库的可测试模块、
-  运行模块级测试套件时触发此技能。触发关键词包括："模块测试"、"集成测试"、"测试配置"、"扫描模块"、
-  "生成测试目标"、"初始化测试配置"、"运行模块测试"、"module test"、"integration test"、
-  "test config"、"init test config"、"run module tests"。当用户提及 test-config/ 目录、
-  index.yml 或任何模块测试配置 YAML 文件时也应触发。此技能管理一个半自动化工作流：扫描代码仓库、
-  生成配置文件（列出功能/代码/测试目标）、让工程师审查编辑、然后生成并运行 pytest（Python）或
-  googletest（C++）测试。
+  半自动模块测试/集成测试生成。扫描仓库 → 生成测试配置（index.yml + 模块 YAML）→ 工程师审查 → 生成并运行 pytest/googletest。
+  触发词：模块测试、集成测试、测试配置、扫描模块、生成测试目标、module test、integration test、test config。
+  提及 test-config/ 目录或模块测试 YAML 文件时也应触发。
+  命令：init, generate, run。
 ---
 
 # 模块测试生成器
