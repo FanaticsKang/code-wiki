@@ -49,6 +49,34 @@ description: >
 
 ## 核心原则
 
+### 全自动无交互
+
+整个流程自动完成，**不向用户询问任何问题**。遇到编译错误、导入失败、断言失败等问题时，
+自行分析原因、修复测试代码、重试。只有在所有自动修复手段穷尽后才在报告中记录问题。
+
+### 客观反映源码真实行为
+
+测试必须忠实反映源码的实际行为，而非"应该怎样"。断言基于**源码实际输出**编写，
+不预设理想行为。如果源码行为与预期不符（如返回类型不一致、边界返回意外值），
+以源码实际行为为准写断言，同时在报告中标记为疑似问题。
+
+### 主动暴露源码问题
+
+测试的目标之一是发现源码缺陷。当测试揭示以下情况时，不回避、不掩盖，
+在报告中明确标记：
+
+- 源码与类型注解/文档不一致
+- 边界输入导致崩溃（未捕获异常）
+- 并发/竞态隐患
+- 资源泄漏（未关闭的文件/连接）
+
+### 失败就是失败，不要隐藏为跳过
+
+测试失败时不得通过 `pytest.skip`、`@unittest.skip`、`GTEST_SKIP` 等机制将失败
+伪装为跳过。每个失败用例必须在报告中完整记录：失败断言、实际 vs 预期、所在位置。
+唯一允许跳过的场景是测试环境缺少必要的运行时依赖（如特定版本的库），且必须在
+报告中注明跳过原因。
+
 ### 禁止跳过函数
 
 **凡是通过扫描过滤的函数（非存根、非私有模块），必须生成测试。** 遇到外部依赖时
@@ -60,6 +88,12 @@ description: >
 - "无法 mock"
 
 报告中也不得出现"建议通过集成测试覆盖"、"依赖复杂跳过"等措辞。
+
+### 禁止生成空框架
+
+每个函数必须生成完整的测试用例，包含功能性测试和边界测试的具体代码。禁止生成
+只有函数签名和 `pass`、`# TODO`、`NotImplementedError` 的空壳测试。每个测试
+函数体内必须有：具体的输入构造、被测函数调用、断言验证。
 
 ### Mock 外部边界，测试内部逻辑
 
@@ -268,96 +302,16 @@ Regenerate with: /unit-test-gen auto
 
 ---
 
-## `test_cases.json` 结构
+## `test_cases.json`
 
-只存元数据和 MD5，**不存测试代码**（测试代码只在源文件里）。
-
-```json
-{
-  "version": "1.0",
-  "generated_at": "2026-04-16T12:34:56+09:00",
-  "languages": ["python", "cpp"],
-  "test_frameworks": {"python": "pytest", "cpp": "gtest"},
-  "source_dirs": ["src"],
-  "mode_last_run": "incremental",
-  "summary": {
-    "total_files": 42,
-    "total_functions": 187,
-    "total_cases": 612
-  },
-  "files": {
-    "src/core/parser.py": {
-      "file_md5": "a1b2c3...",
-      "test_path": "test/generated_unit/core/test_parser.py",
-      "functions": {
-        "parse_header": {
-          "func_md5": "d4e5f6...",
-          "line_range": [12, 45],
-          "signature": "parse_header(data: bytes, strict: bool = False) -> Header",
-          "is_async": false,
-          "class_name": null,
-          "dimensions": ["functional", "boundary", "exception", "security"],
-          "cases": [
-            {
-              "id": "parse_header_functional_normal",
-              "type": "normal",
-              "dimension": "functional",
-              "description": "标准输入返回预期的 Header 对象"
-            },
-            {
-              "id": "parse_header_boundary_empty",
-              "type": "boundary",
-              "dimension": "boundary",
-              "description": "空 bytes 输入的边界行为"
-            }
-          ]
-        }
-      }
-    }
-  }
-}
-```
-
-`test_frameworks` 的值由各语言参考文档定义（如 Python → pytest，C++ → gtest）。
+基线文件只存元数据和 MD5，不存测试代码。完整结构见 [`references/test-cases-schema.md`](references/test-cases-schema.md)。
 
 ---
 
 ## 报告格式
 
-写入 `test/generated_unit/report.md`：
-
-```markdown
-# 单元测试报告
-
-**日期**：2026-04-16 12:34
-**模式**：incremental
-**语言**：<语言> (<框架>)
-**扫描范围**：src/
-**函数覆盖**：187 / 187 (100%)
-**测试数量**：612  **通过**：598  **失败**：14
-
-## 增量信息（增量模式时显示）
-
-- 文件级变更：3 个
-- 函数级变更：12 个
-- 新增函数：5 个
-- 删除函数：2 个
-- 未变更跳过：170 个函数
-
-## 失败用例
-
-### test_core_parser.py::test_parse_header_exception_truncated
-
-- 函数：`parse_header`
-- 维度：异常容错
-- 失败原因：`AssertionError: expected ValueError but got IndexError`
-- 判定：可能是源码 bug，建议 review `src/core/parser.py:23`
-
-## 生成/更新文件
-
-- test/generated_unit/core/test_parser.py（更新）
-- test/generated_unit/utils/test_format.py（新增）
-```
+写入 `test/generated_unit/report.md`，包含头部元信息表、执行摘要表、增量信息、失败用例详情、文件变更列表。
+完整模板和字段说明见 [`references/report-format.md`](references/report-format.md)。
 
 ---
 
@@ -374,9 +328,4 @@ Regenerate with: /unit-test-gen auto
 - **`run_and_report.py`** — 执行测试并生成 markdown 报告。
   `python scripts/run_and_report.py --output report.md`
 
-### C++ 特定说明
-
-- **CMake 集成**：自动检测 `CMakeLists.txt`，在 `test/generated_unit/` 下生成 `CMakeLists.txt` 子配置
-- **gtest binary**：通过 `cmake --build` 编译测试目标，`ctest` 执行
-- **tree-sitter 解析**：C++ 代码通过 `tree_sitter` + `tree_sitter_cpp` 解析，需安装这两个包
-- **辅助头文件**：C++ 测试共享 `test/generated_unit/_helpers.hpp`，包含边界值常量、Mock 工具、性能断言等
+C++ 的 CMake 集成、tree-sitter 解析、辅助头文件等细节见 [`references/language-cpp.md`](references/language-cpp.md)。
