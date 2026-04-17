@@ -45,6 +45,40 @@
           ]
         }
       }
+    },
+    "src/core/lexer.cpp": {
+      "file_md5": "7g8h9i...",
+      "test_path": "test/generated_unit/core/test_lexer.cpp",
+      "functions": {
+        "Tokenize": {
+          "func_md5": "j1k2l3...",
+          "line_range": [30, 78],
+          "signature": "std::vector<Token> Tokenize(const std::string& input, size_t max_tokens = 1024)",
+          "is_async": false,
+          "class_name": "Lexer",
+          "dimensions": ["functional", "boundary", "exception", "performance"],
+          "cases": [
+            {
+              "id": "Lexer_Tokenize_functional_normal",
+              "type": "normal",
+              "dimension": "functional",
+              "description": "标准输入返回正确的 Token 序列"
+            },
+            {
+              "id": "Lexer_Tokenize_boundary_max_tokens",
+              "type": "boundary",
+              "dimension": "boundary",
+              "description": "超过 max_tokens 时截断并正确终止"
+            },
+            {
+              "id": "Lexer_Tokenize_exception_invalid_utf8",
+              "type": "error",
+              "dimension": "exception",
+              "description": "非法 UTF-8 字节序列抛出 std::runtime_error"
+            }
+          ]
+        }
+      }
     }
   }
 }
