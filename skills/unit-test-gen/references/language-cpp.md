@@ -235,7 +235,7 @@ TEST(FetchUserTest, ExceptionTimeout) {
 TEST(ComputeRateTest, DataIntegrityPrecision) {
     // 浮点运算结果应在容差范围内
     double result = compute_rate(0.1, 0.2);
-    test_helpers::assert_approx(result, 0.3, 1e-9);
+    test_helpers::assertApprox(result, 0.3, 1e-9);
 }
 ```
 
@@ -243,7 +243,7 @@ TEST(ComputeRateTest, DataIntegrityPrecision) {
 ```cpp
 TEST(FormatIdTest, DataIntegrityDeterministic) {
     // 纯函数多次调用结果一致
-    test_helpers::assert_deterministic(format_id, "user", 42);
+    test_helpers::assertDeterministic(format_id, "user", 42);
 }
 ```
 
@@ -445,7 +445,7 @@ TEST(FetchUserTest, ExceptionTimeout) {
 TEST(ComputeRateTest, DataIntegrityPrecision) {
     // 浮点运算结果应在容差范围内
     double result = compute_rate(0.1, 0.2);
-    test_helpers::assert_approx(result, 0.3, 1e-9);
+    test_helpers::assertApprox(result, 0.3, 1e-9);
 }
 ```
 
@@ -453,7 +453,7 @@ TEST(ComputeRateTest, DataIntegrityPrecision) {
 ```cpp
 TEST(FormatIdTest, DataIntegrityDeterministic) {
     // 纯函数多次调用结果一致
-    test_helpers::assert_deterministic<format_id, std::string, int>(
+    test_helpers::assertDeterministic<format_id, std::string, int>(
         std::make_tuple(std::string("user"), 42), 5);
 }
 ```
@@ -475,7 +475,7 @@ TEST(EncodeDecodeTest, DataIntegrityRoundtrip) {
 ```cpp
 TEST(SortDataTest, PerformanceLargeInput) {
     // 大规模输入下排序应在合理时间内完成
-    auto large_input = test_helpers::generate_large_vector<int>(
+    auto large_input = test_helpers::generateLargeVector<int>(
         test_helpers::PERFORMANCE_CONFIG["large"]);
     auto start = std::chrono::high_resolution_clock::now();
     auto result = sort_data(large_input);
@@ -490,9 +490,9 @@ TEST(SortDataTest, PerformanceLargeInput) {
 ```cpp
 TEST(SearchIndexTest, PerformanceScalability) {
     // 验证处理时间随输入规模线性增长
-    auto small = test_helpers::generate_large_vector<int>(100);
-    auto large = test_helpers::generate_large_vector<int>(10000);
-    double ratio = test_helpers::assert_scalability(
+    auto small = test_helpers::generateLargeVector<int>(100);
+    auto large = test_helpers::generateLargeVector<int>(10000);
+    double ratio = test_helpers::assertScalability(
         search_index, small, large, 200.0);
     // ratio 记录在报告中供人工审查
 }

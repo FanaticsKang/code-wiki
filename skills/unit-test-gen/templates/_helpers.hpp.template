@@ -90,7 +90,7 @@ inline const std::vector<std::string> STRING_BOUNDARIES = {
 
 // 向量边界值
 template <typename T>
-std::vector<std::vector<T>> vector_boundaries() {
+std::vector<std::vector<T>> vectorBoundaries() {
     return {
         {},               // 空
         {T{}},            // 单默认元素
@@ -98,8 +98,8 @@ std::vector<std::vector<T>> vector_boundaries() {
     };
 }
 
-inline const auto INT_VECTOR_BOUNDARIES = vector_boundaries<int>();
-inline const auto STRING_VECTOR_BOUNDARIES = vector_boundaries<std::string>();
+inline const auto INT_VECTOR_BOUNDARIES = vectorBoundaries<int>();
+inline const auto STRING_VECTOR_BOUNDARIES = vectorBoundaries<std::string>();
 
 // Map 边界值
 inline const std::vector<std::map<std::string, std::string>> MAP_BOUNDARIES = {
@@ -126,7 +126,7 @@ inline const std::vector<bool> BOOL_BOUNDARIES = {true, false};
 // 浮点近似断言（处理 NaN/Inf）
 // =============================================================================
 
-inline void assert_approx(double actual, double expected, double tol = 1e-9) {
+inline void assertApprox(double actual, double expected, double tol = 1e-9) {
     // NaN 处理
     if (std::isnan(actual) && std::isnan(expected)) {
         return;
@@ -164,7 +164,7 @@ inline void assert_approx(double actual, double expected, double tol = 1e-9) {
 // =============================================================================
 
 template <typename Func, typename... Args>
-void assert_deterministic(Func func, int runs, Args&&... args) {
+void assertDeterministic(Func func, int runs, Args&&... args) {
     auto first = func(std::forward<Args>(args)...);
     for (int i = 1; i < runs; ++i) {
         auto other = func(std::forward<Args>(args)...);
@@ -190,7 +190,7 @@ inline const PerformanceConfig PERFORMANCE_CONFIG = {};
 
 // 生成大规模向量
 template <typename T>
-std::vector<T> generate_large_vector(int size, T (*factory)(int) = nullptr) {
+std::vector<T> generateLargeVector(int size, T (*factory)(int) = nullptr) {
     std::vector<T> result;
     result.reserve(size);
     for (int i = 0; i < size; ++i) {
@@ -204,13 +204,13 @@ std::vector<T> generate_large_vector(int size, T (*factory)(int) = nullptr) {
 }
 
 // 生成大规模字符串
-inline std::string generate_large_string(int size) {
+inline std::string generateLargeString(int size) {
     return std::string(size, 'a');
 }
 
 // 可扩展性断言：验证函数处理大规模输入的时间增长在合理范围内
 template <typename Func, typename Input>
-double assert_scalability(Func func, const Input& small_input,
+double assertScalability(Func func, const Input& small_input,
                           const Input& large_input, double max_ratio = 100.0) {
     // 预热
     func(small_input);
