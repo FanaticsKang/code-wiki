@@ -6,6 +6,7 @@ description: >
   触发词：单元测试、生成测试、测试覆盖率、增量测试、回归测试、unit test、跑测试、给函数加测试、哪些函数没被测试。
   提及 test/generated_unit/ 或 test_cases.json 时也应触发。
   命令：init, generate, run, auto。
+argument-hint: "init | generate | run | auto"
 ---
 
 # 单元测试生成器
