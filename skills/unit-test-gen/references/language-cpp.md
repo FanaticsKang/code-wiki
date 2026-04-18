@@ -739,6 +739,104 @@ cmake --build build --target unit_tests
 
 ---
 
+## 覆盖率收集（C++）
+
+### 依赖
+
+- `gcov`（GCC 自带）或 `llvm-cov`（Clang）
+- `lcov`（GCC 覆盖率报告前端）
+- 环境预检自动检查可用性，不可用时跳过覆盖率收集
+
+### 编译标志
+
+覆盖率收集需要重新编译，添加 `--coverage` 标志（等价于 `-fprofile-arcs -ftest-coverage`）：
+
+```bash
+cmake -DCMAKE_CXX_FLAGS="--coverage" -DCMAKE_EXE_LINKER_FLAGS="--coverage" ..
+cmake --build build
+```
+
+### 执行 + 收集
+
+```bash
+# 运行测试
+./build/unit_tests
+
+# 收集覆盖率数据
+lcov --capture --directory build --output-file coverage.info
+
+# 移除系统头文件和第三方代码
+lcov --remove coverage.info '/usr/*' '*/third_party/*' '*/external/*' --output-file coverage.info
+
+# 生成摘要
+lcov --summary coverage.info
+```
+
+### 指标解析
+
+从 `lcov --summary` 输出提取三种指标：
+
+| 指标 | 输出模式 | 解析方式 |
+|------|---------|---------|
+| 语句覆盖率 | `lines......: XX.X% (NNN of NNN lines)` | 正则匹配 `lines.*?(\d+\.\d+)%.*?(\d+).*?(\d+)` |
+| 函数覆盖率 | `functions..: XX.X% (NNN of NNN functions)` | 正则匹配 `functions.*?(\d+\.\d+)%.*?(\d+).*?(\d+)` |
+| 分支覆盖率 | `branches...: XX.X% (NNN of NNN branches)` | 正则匹配 `branches.*?(\d+\.\d+)%.*?(\d+).*?(\d+)` |
+
+### 清理
+
+覆盖率数据文件（`.gcda`、`.gcno`）在测试后生成，可在报告生成后清理：
+
+```bash
+find build -name "*.gcda" -delete
+find build -name "*.gcno" -delete
+```
+
+---
+
+## Dead Code 检测（C++）
+
+### 依赖
+
+- 编译器警告（`-Wunused-function`）或 `cppcheck`
+- 环境预检自动检查可用性
+
+### 方法 1：编译器警告
+
+在编译时启用未使用函数警告：
+
+```bash
+cmake -DCMAKE_CXX_FLAGS="-Wunused-function" ..
+cmake --build build 2>&1 | grep "warning: unused function"
+```
+
+输出格式：`<file>:<line>:<col>: warning: unused function '<name>' [-Wunused-function]`
+
+### 方法 2：cppcheck
+
+```bash
+cppcheck --enable=unusedFunction <source_dirs> 2>&1
+```
+
+输出格式：`[<file>:<line>]: (style) The function '<name>' is never used.`
+
+### 解析策略
+
+1. 收集编译器警告或 cppcheck 输出
+2. 提取 `文件路径:行号:函数名`
+3. 过滤已知误报：
+   - `main` 函数
+   - 带 `[[maybe_unused]]` 属性的函数
+   - 模板函数和内联函数（可能被头文件包含使用）
+4. 与覆盖率 0% 的函数列表交叉验证
+
+### 局限性
+
+- 模板实例化和宏展开可能导致误报
+- 虚函数和回调注册的函数会被误报
+- 报告中标注为「候选项」
+
+---
+
 ## 常见坑和应对
 
 ### 1. include 路径问题

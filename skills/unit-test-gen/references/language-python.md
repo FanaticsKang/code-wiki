@@ -612,6 +612,91 @@ python -m pytest \
 
 ---
 
+## 覆盖率收集（Python）
+
+### 依赖
+
+`pytest-cov`（环境预检自动检查，未安装时尝试 `pip install pytest-cov -i https://pypi.org/simple/`）。
+
+### 收集命令
+
+```bash
+python -m pytest test/generated_unit/ \
+  --cov --cov-branch \
+  --cov-report=json:coverage.json \
+  --cov-report=term-missing \
+  -v --tb=short
+```
+
+- `--cov`：启用覆盖率收集（语句覆盖率和函数覆盖率）
+- `--cov-branch`：同时收集分支覆盖率
+- `--cov-report=json:coverage.json`：输出 JSON 格式报告（用于解析详细数据）
+- `--cov-report=term-missing`：终端输出未覆盖的行号
+
+### 覆盖率配置
+
+使用项目根目录的 `.coveragerc` 或 `pyproject.toml [tool.coverage]`。如果没有，覆盖率统计所有源码目录。
+
+### 指标解析
+
+从 `coverage.json` 提取三种指标：
+
+| 指标 | JSON 路径 | 计算方式 |
+|------|----------|---------|
+| 语句覆盖率 | `files[<path>].summary.covered_lines / num_statements` | 已执行语句占比 |
+| 函数覆盖率 | `files[<path>].functions` 中 `count > 0` 的比例 | 已调用函数占比 |
+| 分支覆盖率 | `files[<path>].summary.covered_branches / num_branches` | 已走分支占比 |
+
+### 总计指标
+
+从 `coverage.json` 的顶层 `totals` 字段直接读取：
+
+```python
+totals = data["totals"]
+statement_pct = totals["covered_lines"] / totals["num_statements"] * 100
+branch_pct = totals["covered_branches"] / totals["num_branches"] * 100
+```
+
+---
+
+## Dead Code 检测（Python）
+
+### 依赖
+
+`vulture`（环境预检自动检查，未安装时尝试 `pip install vulture -i https://pypi.org/simple/`）。
+
+### 检测命令
+
+```bash
+vulture <source_dirs> --min-confidence 80 --sort-by-size
+```
+
+- `--min-confidence`：最低置信度阈值（来自 `coverage_config.dead_code_min_confidence`，默认 80）
+- `--sort-by-size`：按代码大小排序，优先展示最可能的无用代码
+
+### 输出格式
+
+```
+<file>:<line>: unused <type> '<name>' (<confidence>%)
+```
+
+### 解析策略
+
+1. 逐行解析输出，提取 `文件路径:行号:类型:名称:置信度`
+2. 过滤已知误报：
+   - 入口函数：`main`、`if __name__ == "__main__"` 下的调用
+   - CLI handler：带 `@click.command`、`argparse` 相关装饰器的函数
+   - 测试辅助：`conftest.py` 中的 fixture
+3. 与覆盖率 0% 的函数列表交叉验证，两处都标记的优先级更高
+
+### 局限性
+
+- 动态调用（`getattr(obj, name)`）会导致误报
+- 插件/注册机制调用的函数会被误报
+- 报告中标注为「候选项」，建议用户复核
+
+---
+
 ## 常见坑和应对
 
 ### 1. 路径问题

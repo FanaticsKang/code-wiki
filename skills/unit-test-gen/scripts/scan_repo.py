@@ -1066,6 +1066,23 @@ def compare_with_baseline(current: dict, baseline_path: Path | None) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# 测试路径计算
+# ---------------------------------------------------------------------------
+
+def _compute_test_path(source_rel_path: str) -> str | None:
+    """根据源码相对路径计算测试文件路径。
+
+    规则：source <path>/<name>.<ext> → test/generated_unit/<path>/test_<name>.<ext>
+    例如：core/dag/parser.py → test/generated_unit/core/dag/test_parser.py
+    """
+    p = Path(source_rel_path)
+    name = p.name
+    if not name.startswith("test_"):
+        name = f"test_{name}"
+    return str(Path("test/generated_unit") / p.parent / name)
+
+
+# ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
 
@@ -1113,7 +1130,12 @@ def main():
 
         finfo = analyzer.extract_functions(fpath, repo_root)
         if finfo.get("functions"):
-            result["files"][str(fpath.relative_to(repo_root))] = finfo
+            rel = str(fpath.relative_to(repo_root))
+            # 计算测试文件路径：source path/ext → test/generated_unit/path/test_name.ext
+            test_path = _compute_test_path(rel)
+            if test_path:
+                finfo["test_path"] = test_path
+            result["files"][rel] = finfo
 
     total_functions = sum(
         len(f["functions"]) for f in result["files"].values()

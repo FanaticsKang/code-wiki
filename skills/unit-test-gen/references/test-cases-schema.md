@@ -17,6 +17,20 @@
     "total_functions": 187,
     "total_cases": 612
   },
+  "coverage_config": {
+    "statement_threshold": 70,
+    "function_threshold": 70,
+    "branch_threshold": 60,
+    "exclude_dirs": [],
+    "dead_code_min_confidence": 80
+  },
+  "tool_status": {
+    "pytest_cov": true,
+    "vulture": true,
+    "gcov": false,
+    "lcov": false,
+    "cppcheck": false
+  },
   "files": {
     "src/core/parser.py": {
       "file_md5": "a1b2c3...",
@@ -97,6 +111,8 @@
 | `source_dirs` | string[] | 扫描的源码目录 |
 | `mode_last_run` | string | 上次运行模式（`full` / `incremental`） |
 | `summary` | object | 汇总统计 |
+| `coverage_config` | object | 覆盖率配置（可选，未配置时使用默认值） |
+| `tool_status` | object | 工具可用状态（环境预检自动写入） |
 | `files` | object | 以文件路径为键的文件级数据 |
 
 ### summary
@@ -141,3 +157,25 @@
 - `test_frameworks` 的值由各语言参考文档定义（Python → pytest，C++ → gtest）
 - 增量模式通过对比 `file_md5` 和 `func_md5` 判定变更范围
 - `cases` 只存描述元数据，**不含**测试代码、输入输出值
+- `coverage_config` 为可选字段，缺失时使用默认阈值（语句 70%、函数 70%、分支 60%）
+- `tool_status` 由环境预检自动写入，不应手动修改
+
+### coverage_config
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `statement_threshold` | int | 70 | 语句覆盖率最低阈值（%） |
+| `function_threshold` | int | 70 | 函数覆盖率最低阈值（%） |
+| `branch_threshold` | int | 60 | 分支覆盖率最低阈值（%） |
+| `exclude_dirs` | string[] | [] | 排除覆盖率统计的目录 |
+| `dead_code_min_confidence` | int | 80 | dead code 检测的最低置信度（%） |
+
+### tool_status
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `pytest_cov` | bool | Python 覆盖率工具 pytest-cov 是否可用 |
+| `vulture` | bool | Python dead code 检测工具 vulture 是否可用 |
+| `gcov` | bool | C++ 覆盖率工具 gcov 是否可用 |
+| `lcov` | bool | C++ 覆盖率报告工具 lcov 是否可用 |
+| `cppcheck` | bool | C++ 静态分析工具 cppcheck 是否可用 |

@@ -9,47 +9,99 @@
 
 | 项目 | 值 |
 |------|-----|
-| 日期 | 2026-04-16 12:34 |
-| 模式 | incremental |
-| 语言 | Python (pytest) |
-| 扫描范围 | src/ |
-| 函数覆盖 | 187 / 187 (100%) |
+| 日期 | <YYYY-MM-DD HH:MM> |
+| 模式 | <full\|incremental> |
+| 语言 | <language> (<framework>) |
+| 扫描范围 | <source dirs> |
+| 函数覆盖 | <covered> / <total> (<pct>%) |
 
 ## 执行摘要
 
 | 指标 | 值 |
 |------|-----|
-| 总测试数 | 612 |
-| 通过 | 598 |
-| 失败 | 10 |
-| 错误 | 2 |
-| 跳过 | 2 |
-| 耗时 | 12.3s |
-| 通过率 | 97.7% |
+| 总测试数 | <total> |
+| 通过 | <passed> |
+| 失败 | <failed> |
+| 错误 | <errors> |
+| 跳过 | <skipped> |
+| 耗时 | <seconds>s |
+| 通过率 | <rate>% |
 
 ## 增量信息（增量模式时显示）
 
-| 指标 | 值 |
-|------|-----|
-| 文件级变更 | 3 |
-| 函数级变更 | 12 |
-| 新增函数 | 5 |
-| 删除函数 | 2 |
-| 未变更跳过 | 170 |
+- 文件级变更：<n> 个
+- 函数级变更：<n> 个
+- 新增文件：<n> 个
+- 删除文件：<n> 个
+- 未变更跳过：<n> 个函数
 
-## 失败用例
+## 未通过用例
 
-### test_core_parser.py::test_parse_header_exception_truncated
+### 1. `<source_file>:<line>` — <function_name>
+- 测试：`<test_nodeid>` (<失败类型>)
+- 源文件：`<source_file>`
+- 函数行范围：[<start>, <end>]
 
-- 函数：`parse_header`
-- 维度：异常容错
-- 失败原因：`AssertionError: expected ValueError but got IndexError`
-- 判定：可能是源码 bug，建议 review `src/core/parser.py:23`
+\```
+<traceback>
+\```
+
+### 2. `<source_file>:<line>` — <function_name>
+- 测试：`<test_nodeid>` (断言失败)
+...
+
+## 跳过用例详情（如有）
+
+- `<test_nodeid>` — 跳过原因: <reason>
+
+## 测试结果概览
+
+- [PASS] `<test_file>` — <passed>/<total> 通过
+- [FAIL] `<test_file>` — <passed>/<total> 通过
+
+## 覆盖率报告（覆盖率工具可用时显示）
+
+### 模块覆盖率汇总
+
+| 模块 | 语句覆盖率 | 函数覆盖率 | 分支覆盖率 | 状态 |
+|------|-----------|-----------|-----------|------|
+| core/dag/ | 45% | 52% | 31% | ⚠️ 未达标 |
+| core/batch/ | 88% | 90% | 75% | ✅ 达标 |
+| node/ | 34% | 40% | 22% | ⚠️ 未达标 |
+| **总计** | **45%** | **51%** | **35%** | |
+| *阈值* | *≥70%* | *≥70%* | *≥60%* | |
+
+> ⚠️ 标记表示该指标未达到配置阈值。*覆盖率工具不可用时此章节替换为：覆盖率数据未收集（缺少 pytest-cov）*
+
+### 未达标模块分析
+
+#### core/dag/
+- 语句覆盖率 45%（阈值 70%）：主要未覆盖文件为 `sub_dag_node.py`（8%）、`master_node.py`（11%）
+- 函数覆盖率 52%（阈值 70%）：`sub_dag_node.py` 中 15/20 个函数未被测试调用
+- 分支覆盖率 31%（阈值 60%）：`dag_executor.py` 的异常处理分支均未触发
+- 原因分析：子 DAG 执行流程依赖完整流水线上下文，mock 难度较高
+
+### 文件覆盖率明细
+
+| 文件 | 语句 | 函数 | 分支 | 未覆盖函数 |
+|------|------|------|------|-----------|
+| core/dag/sub_dag_node.py | 8% | 10% | 5% | `execute()`, `_build_sub_dag()`, ... |
+| core/dag/dag_builder.py | 42% | 50% | 35% | `load_dag()`, ... |
+| ... | ... | ... | ... | ... |
+
+## Dead Code 检测结果（检测工具可用时显示）
+
+| 位置 | 类型 | 名称 | 置信度 | 备注 |
+|------|------|------|--------|------|
+| `core/batch/processor.py:45` | function | `_legacy_handler` | 90% | 可能被外部调用 |
+| `node/msg_map/type_mappings.py:12` | variable | `_DEPRECATED_MAP` | 100% | 未被引用 |
+
+> Dead code 检测结果为候选项，可能存在误报（如动态调用、反射、入口函数等）。建议复核后决定是否删除。
+> *检测工具不可用时此章节替换为：Dead code 检测未执行（缺少 vulture）*
 
 ## 生成/更新文件
 
-- test/generated_unit/core/test_parser.py（更新）
-- test/generated_unit/utils/test_format.py（新增）
+- `<test_file>`（新增|更新）
 ```
 
 ## 字段说明
@@ -80,18 +132,27 @@
 
 仅在增量模式下显示。全量模式省略此节。
 
-### 失败用例
+### 未通过用例
 
-每个失败/错误的用例单独一节，包含：
+标题以**源码位置**开头（`source_file:line — function_name`），而非测试名。
+便于快速定位实际出错的源码位置。
 
-| 字段 | 说明 |
-|------|------|
-| 测试标识 | 文件名 + `::` + 测试函数名 |
-| 函数 | 被测函数名 |
-| 维度 | 所属测试维度 |
-| 失败原因 | 断言失败的原始错误信息 |
-| 判定 | `测试代码问题`（需修正测试）或 `疑似源码 bug`（附建议 review 位置） |
+失败类型分为三类：
+
+| 类型 | 判定方式 |
+|------|---------|
+| 断言失败 | traceback 含 `AssertionError` 且有 `E   AssertionError` 模式 |
+| 执行异常 | 其他未捕获异常 |
+| fixture 错误 | 来自 ERRORS section（测试未实际执行） |
+
+### 跳过用例详情
+
+列出所有被跳过的测试及其原因。仅在存在跳过用例时显示。
+
+### 测试结果概览
+
+按文件分组展示通过率，`[PASS]` 表示全部通过，`[FAIL]` 表示有失败。
 
 ### 生成/更新文件
 
-列出本次 `generate` 阶段新增或更新的测试文件，标注状态（新增 / 更新）。
+列出本次 `generate` 阶段新增或更新的测试文件。
