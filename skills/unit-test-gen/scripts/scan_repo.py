@@ -3,12 +3,27 @@
 scan_repo.py — 扫描代码仓库，提取所有可测试函数（支持 Python 和 C++）。
 
 输出 JSON 结构包含每个文件和函数的元信息（签名、MD5、AST 特征、适用维度）。
-Claude 读取此输出后决定生成哪些测试用例。
+Claude 读取此输出后补充每个函数的 `cases` 描述（测试用例元数据）。
 
-用法：
-    python scan_repo.py <repo_root> [--source core,utils] [--baseline test_cases.json]
+两种用法：
 
-如果提供 --baseline，输出中会包含与基线对比的变更信息。
+1. 调试模式（stdout，默认）：
+    python scan_repo.py <repo_root> [--source core,utils]
+    python scan_repo.py <repo_root> --baseline test/generated_unit/test_cases.json
+    → 输出完整 JSON 到 stdout，适合人工 / Claude 检视
+
+2. 工作流模式（直写基线文件，merge 语义）：
+    python scan_repo.py <repo_root> --output test/generated_unit/test_cases.json
+    python scan_repo.py <repo_root> --output test/generated_unit/test_cases.json --mode full
+    → 直接写入/合并基线，字段级 merge：
+      - 保留用户的 `coverage_config`（仅在不存在时写入默认值）
+      - 不触碰 `tool_status`（归 run_and_report.py 负责）
+      - 保留未变更函数的 `cases`（LLM 产物，scanner 不管）
+      - 增量模式（默认）：`--mode incremental`，只覆盖变更函数的元数据
+      - 全量模式：`--mode full`，对所有函数重写元数据但仍保留 cases
+
+调试产物（如扫描原始结果的保留副本）建议另存到 .test/generated_unit/scan_result.json：
+    python scan_repo.py <repo_root> > .test/generated_unit/scan_result.json
 """
 
 import argparse
@@ -18,8 +33,21 @@ import json
 import os
 import sys
 from abc import ABC, abstractmethod
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+# 基线格式版本。改变字段结构时递增。
+BASELINE_VERSION = "1.0"
+
+# coverage_config 默认值（仅在基线文件中不存在 coverage_config 时写入）
+DEFAULT_COVERAGE_CONFIG = {
+    "statement_threshold": 70,
+    "function_threshold": 70,
+    "branch_threshold": 60,
+    "exclude_dirs": [],
+    "dead_code_min_confidence": 80,
+}
 
 # C++ 解析（可选依赖，仅扫描 C++ 文件时需要）
 try:
@@ -1083,6 +1111,198 @@ def _compute_test_path(source_rel_path: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# 基线构建与 merge
+# ---------------------------------------------------------------------------
+
+# 函数级字段：这些字段由 scanner 负责写入/更新（语法/AST 层面的事实）
+_SCANNER_OWNED_FUNC_FIELDS = (
+    "func_md5", "line_range", "signature", "is_async",
+    "class_name", "dimensions", "features", "mocks_needed",
+)
+
+# 函数级字段：这些字段由 Claude/LLM 负责，scanner 不动（语义层面的产物）
+_LLM_OWNED_FUNC_FIELDS = ("cases",)
+
+
+def _func_metadata_from_scan(scan_func: dict) -> dict:
+    """从 scanner 原始输出提取函数级元数据字段（剔除 scanner 自己用的临时字段）。
+
+    scanner 内部有 `name`、`decorators`、`has_float_type` 等字段，这些是调试/
+    中间字段，不进基线。进基线的只有 _SCANNER_OWNED_FUNC_FIELDS。
+    """
+    result = {}
+    for key in _SCANNER_OWNED_FUNC_FIELDS:
+        if key in scan_func:
+            result[key] = scan_func[key]
+    return result
+
+
+def build_baseline(scan_result: dict, mode: str) -> dict:
+    """将 scanner 的纯扫描产物（scan_result）组织成完整基线结构。
+
+    这只是把字段重新组织,不做 merge；merge 留给 merge_into_baseline。
+
+    参数：
+      scan_result: scanner 内部构造的扫描结果（含 languages、files 等）
+      mode: "full" 或 "incremental"，写入 mode_last_run 字段
+
+    返回：基线结构的字典（不含 cases，cases 由 Claude 后补）
+    """
+    baseline_files = {}
+    for src_path, file_info in scan_result["files"].items():
+        func_out = {}
+        for func_key, func_data in file_info.get("functions", {}).items():
+            func_out[func_key] = _func_metadata_from_scan(func_data)
+            # 新扫描的函数 cases 为空数组，等 Claude 补
+            func_out[func_key]["cases"] = []
+
+        baseline_files[src_path] = {
+            "file_md5": file_info["file_md5"],
+            "test_path": file_info.get("test_path", ""),
+            "functions": func_out,
+        }
+
+    total_cases = sum(
+        len(f.get("cases", []))
+        for fi in baseline_files.values()
+        for f in fi["functions"].values()
+    )
+
+    return {
+        "version": BASELINE_VERSION,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "languages": scan_result["languages"],
+        "test_frameworks": scan_result["test_frameworks"],
+        "source_dirs": scan_result["source_dirs"],
+        "mode_last_run": mode,
+        "summary": {
+            **scan_result.get("summary", {}),
+            "total_cases": total_cases,
+        },
+        "coverage_config": dict(DEFAULT_COVERAGE_CONFIG),
+        # tool_status 由 run_and_report.py 的环境预检写入，scanner 不初始化
+        "files": baseline_files,
+    }
+
+
+def merge_into_baseline(existing: dict, fresh: dict, mode: str,
+                        incremental_info: dict) -> dict:
+    """以字段级别将新扫描结果 merge 进已有基线。
+
+    合并规则：
+    - 顶层：scanner 负责的字段（version/generated_at/mode_last_run/languages/
+      test_frameworks/source_dirs/summary）用 fresh 覆盖。
+    - coverage_config: 若 existing 有则保留用户编辑值；否则用 fresh（DEFAULT）。
+    - tool_status: 若 existing 有则完整保留；没有则不写入（留给 run_and_report）。
+    - files: 字段级 merge
+      - 新增文件：直接从 fresh 取（cases 为空待补）
+      - 删除文件：从 existing 中移除
+      - 文件 MD5 相同（unchanged）：完全保留 existing，连 cases 一起
+      - 文件 MD5 不同但某函数 MD5 未变：保留该函数的 cases，元数据用 fresh
+      - 函数 MD5 变化或新增：元数据用 fresh，cases 置空等 Claude 补
+      - 函数被删除：从 existing 中移除
+
+    全量模式（mode=full）下，仍然按 MD5 判断 cases 能否保留（避免无谓丢失）；
+    mode 只影响 mode_last_run 的字面值。
+
+    参数：
+      existing: 旧 test_cases.json 的内容（可能为空 dict）
+      fresh: 本次 build_baseline 构造的新基线（不含 cases）
+      mode: "full" / "incremental"
+      incremental_info: compare_with_baseline 的输出，用于确定未变文件
+
+    返回：合并后的基线字典
+    """
+    existing_files = existing.get("files", {})
+    fresh_files = fresh["files"]
+    merged_files = {}
+
+    unchanged_files = set()
+    if incremental_info.get("is_incremental"):
+        # 未变更文件：不出现在 changed_files 里的都算未变
+        changed = set(incremental_info.get("changed_files", []))
+        for fp in existing_files:
+            if fp not in changed and fp in fresh_files:
+                unchanged_files.add(fp)
+
+    for src_path, fresh_finfo in fresh_files.items():
+        if src_path in unchanged_files:
+            # 整个文件未变：完全保留 existing（包括所有 cases）
+            merged_files[src_path] = existing_files[src_path]
+            # 但仍然同步 test_path（可能技能版本升级修改了路径规则）
+            merged_files[src_path]["test_path"] = fresh_finfo.get(
+                "test_path", existing_files[src_path].get("test_path", "")
+            )
+            continue
+
+        # 文件变化或新增：逐函数合并
+        existing_funcs = existing_files.get(src_path, {}).get("functions", {})
+        fresh_funcs = fresh_finfo["functions"]
+        merged_funcs = {}
+
+        for func_key, fresh_func in fresh_funcs.items():
+            existing_func = existing_funcs.get(func_key, {})
+            merged = dict(fresh_func)  # scanner 字段 + 空 cases
+
+            if (existing_func
+                    and existing_func.get("func_md5") == fresh_func.get("func_md5")
+                    and existing_func.get("cases")):
+                # 函数未变，保留旧 cases
+                merged["cases"] = existing_func["cases"]
+            # 否则 cases 就是 fresh 里的空数组 []
+
+            merged_funcs[func_key] = merged
+
+        merged_files[src_path] = {
+            "file_md5": fresh_finfo["file_md5"],
+            "test_path": fresh_finfo.get("test_path", ""),
+            "functions": merged_funcs,
+        }
+    # 不在 fresh 中的文件 = 被删除，自然不会进 merged_files
+
+    # 重新计算 total_cases
+    total_cases = sum(
+        len(f.get("cases", []))
+        for fi in merged_files.values()
+        for f in fi["functions"].values()
+    )
+
+    result = {
+        "version": BASELINE_VERSION,
+        "generated_at": fresh["generated_at"],
+        "languages": fresh["languages"],
+        "test_frameworks": fresh["test_frameworks"],
+        "source_dirs": fresh["source_dirs"],
+        "mode_last_run": mode,
+        "summary": {**fresh["summary"], "total_cases": total_cases},
+        "files": merged_files,
+    }
+
+    # coverage_config: 用户编辑优先
+    if "coverage_config" in existing:
+        result["coverage_config"] = existing["coverage_config"]
+    else:
+        result["coverage_config"] = dict(DEFAULT_COVERAGE_CONFIG)
+
+    # tool_status: 若已存在则保留（run_and_report 会在 run 阶段再次更新）
+    if "tool_status" in existing:
+        result["tool_status"] = existing["tool_status"]
+
+    return result
+
+
+def write_baseline_file(baseline: dict, output_path: Path) -> None:
+    """原子写入基线文件（先写临时文件再 rename，避免中断导致半写状态）。"""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = output_path.with_suffix(output_path.suffix + ".tmp")
+    tmp.write_text(
+        json.dumps(baseline, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    tmp.replace(output_path)
+
+
+# ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
 
@@ -1094,7 +1314,14 @@ def main():
     parser.add_argument("--source", default=None,
                         help="限定扫描的目录，逗号分隔")
     parser.add_argument("--baseline", default=None,
-                        help="基线 test_cases.json 路径（用于增量对比）")
+                        help="基线 test_cases.json 路径（用于增量对比）。"
+                             "与 --output 同时使用时，--output 自动作为 --baseline。")
+    parser.add_argument("--output", default=None,
+                        help="直写/合并基线文件路径（工作流模式）。"
+                             "不指定则输出 JSON 到 stdout（调试模式）。")
+    parser.add_argument("--mode", default="incremental",
+                        choices=["full", "incremental"],
+                        help="扫描模式，写入基线的 mode_last_run 字段（默认 incremental）")
     args = parser.parse_args()
 
     repo_root = Path(args.repo_root).resolve()
@@ -1105,6 +1332,15 @@ def main():
     source_dirs = None
     if args.source:
         source_dirs = [s.strip() for s in args.source.split(",") if s.strip()]
+
+    # 如果指定了 --output 而未显式提供 --baseline，默认把 output 当作基线来增量对比
+    baseline_path = None
+    if args.baseline:
+        baseline_path = Path(args.baseline)
+    elif args.output:
+        candidate = Path(args.output)
+        if candidate.is_file():
+            baseline_path = candidate
 
     lang_info = detect_language_and_framework(repo_root)
 
@@ -1145,9 +1381,50 @@ def main():
         "total_functions": total_functions,
     }
 
-    baseline_path = Path(args.baseline) if args.baseline else None
-    result["incremental"] = compare_with_baseline(result, baseline_path)
+    incremental_info = compare_with_baseline(result, baseline_path)
+    result["incremental"] = incremental_info
 
+    # 工作流模式：直写/合并基线文件
+    if args.output:
+        output_path = Path(args.output)
+        fresh_baseline = build_baseline(result, mode=args.mode)
+
+        existing = {}
+        if baseline_path and baseline_path.is_file():
+            try:
+                with open(baseline_path, "r", encoding="utf-8") as f:
+                    existing = json.load(f)
+            except Exception as e:
+                print(f"警告: 基线文件 {baseline_path} 无法解析（{e}），"
+                      f"按全量处理", file=sys.stderr)
+                existing = {}
+
+        merged = merge_into_baseline(
+            existing, fresh_baseline,
+            mode=args.mode,
+            incremental_info=incremental_info,
+        )
+        write_baseline_file(merged, output_path)
+
+        # stderr 给简要摘要（便于 Claude 和用户看）
+        print(
+            f"基线已写入: {output_path}\n"
+            f"  文件数: {merged['summary'].get('total_files', 0)} | "
+            f"函数数: {merged['summary'].get('total_functions', 0)} | "
+            f"用例数: {merged['summary'].get('total_cases', 0)}",
+            file=sys.stderr,
+        )
+        if incremental_info.get("is_incremental"):
+            changed = len(incremental_info.get("changed_files", []))
+            new = len(incremental_info.get("new_files", []))
+            removed = len(incremental_info.get("removed_files", []))
+            print(
+                f"  增量: 变更 {changed} 文件 | 新增 {new} | 删除 {removed}",
+                file=sys.stderr,
+            )
+        return
+
+    # 调试模式：stdout 输出原始扫描结果
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
 

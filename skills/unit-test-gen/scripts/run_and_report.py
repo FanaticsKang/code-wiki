@@ -4,9 +4,14 @@ run_and_report.py — 执行单元测试（pytest / Google Test）并生成 mark
 
 用法：
     python run_and_report.py                                         # 执行全部 + 报告
-    python run_and_report.py --only test/gen/a.py test/gen/b.py      # 只跑指定文件
-    python run_and_report.py --update-baseline scan_result.json      # 更新 test_cases.json 基线
+    python run_and_report.py --only test/gen/a.py test/gen/b.py      # 只跑指定测试文件
     python run_and_report.py --init-helpers                          # 初始化 helpers 到测试目录
+
+调试中间产物（coverage.json、failures.json、lcov 数据等）默认写入
+.test/generated_unit/。最终报告写入 test/generated_unit/report.md。
+
+注：基线（test_cases.json）现在由 scan_repo.py --output 直接写入/合并，
+本脚本不再需要 --update-baseline。如果仍传入该参数，会给出兼容性提示。
 """
 
 import argparse
@@ -127,12 +132,20 @@ def parse_coverage_config(testcases: dict) -> dict:
 
 
 def collect_python_coverage(test_dir: str, source_dirs: list,
-                            coverage_config: dict) -> dict | None:
+                            coverage_config: dict,
+                            debug_dir: Path | None = None) -> dict | None:
     """Python 覆盖率收集（pytest-cov）。
 
     返回包含 statement/function/branch 三种指标的字典，或 None 表示收集失败。
+
+    coverage.json 是调试中间产物，默认写入 debug_dir（通常 .test/generated_unit/）；
+    若 debug_dir 为 None，则回退到 test_dir 以保持旧行为。
     """
-    coverage_json = Path(test_dir) / "coverage.json"
+    if debug_dir is not None:
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        coverage_json = debug_dir / "coverage.json"
+    else:
+        coverage_json = Path(test_dir) / "coverage.json"
 
     cmd = [
         sys.executable, "-m", "pytest", test_dir,
@@ -212,12 +225,20 @@ def collect_python_coverage(test_dir: str, source_dirs: list,
 
 
 def collect_cpp_coverage(build_dir: str, source_dirs: list,
-                         coverage_config: dict) -> dict | None:
+                         coverage_config: dict,
+                         debug_dir: Path | None = None) -> dict | None:
     """C++ 覆盖率收集（gcov + lcov）。
 
     返回与 Python 相同格式的字典，或 None 表示收集失败。
+
+    coverage.info 是调试中间产物，默认写入 debug_dir（通常 .test/generated_unit/）；
+    若 debug_dir 为 None，则回退到 build_dir 以保持旧行为。
     """
-    coverage_info = Path(build_dir) / "coverage.info"
+    if debug_dir is not None:
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        coverage_info = debug_dir / "coverage.info"
+    else:
+        coverage_info = Path(build_dir) / "coverage.info"
 
     cmd_capture = [
         "lcov", "--capture", "--directory", build_dir,
@@ -973,31 +994,18 @@ def parse_gtest_skip_reasons(output: str) -> dict[str, str]:
 
 
 def load_testcases(path: Path) -> dict:
-    """读取 test_cases.json。不存在时尝试 scan_result.json 作为回退。"""
-    # 尝试 test_cases.json
+    """读取 test_cases.json 基线。
+
+    现在 scanner (scan_repo.py --output) 直接写入 test_cases.json，
+    不再需要从 scan_result.json 回退。如果文件不存在，返回空 dict，
+    调用方应提示用户先运行 init。
+    """
     if path.is_file():
         try:
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except Exception:
-            pass
-
-    # 回退：scan_result.json（init 阶段的直接输出）
-    scan_path = path.parent / "scan_result.json"
-    if scan_path.is_file():
-        try:
-            with open(scan_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            # 自动保存为 test_cases.json 供后续使用
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(
-                json.dumps(data, indent=2, ensure_ascii=False, default=str),
-                encoding="utf-8",
-            )
-            print(f"已从 scan_result.json 生成 test_cases.json")
-            return data
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"警告：无法解析 {path}（{e}）", file=sys.stderr)
 
     return {}
 
@@ -1592,15 +1600,34 @@ def main():
     parser = argparse.ArgumentParser(
         description="运行单元测试（pytest / Google Test）并生成报告"
     )
-    parser.add_argument("--test-dir", default="test/generated_unit/", help="测试目录")
-    parser.add_argument("--output", default="test/generated_unit/report.md", help="报告输出路径")
-    parser.add_argument("--testcases", default="test/generated_unit/test_cases.json", help="test_cases.json 路径")
-    parser.add_argument("--mode", default="incremental", choices=["full", "incremental"], help="模式")
-    parser.add_argument("--only", nargs="*", default=None, help="限定只跑指定测试文件")
-    parser.add_argument("--failures-path", default=None, help="failures.json 输出路径")
-    parser.add_argument("--update-baseline", default=None, help="scan_result.json 路径，用于更新基线")
-    parser.add_argument("--init-helpers", action="store_true", help="初始化 helpers 到测试目录")
+    parser.add_argument("--test-dir", default="test/generated_unit/",
+                        help="测试目录（工作目录，用户可见）")
+    parser.add_argument("--debug-dir", default=".test/generated_unit/",
+                        help="调试目录（中间产物：coverage.json、failures.json、"
+                             "lcov 数据等。默认 .test/generated_unit/）")
+    parser.add_argument("--output", default="test/generated_unit/report.md",
+                        help="报告输出路径（工作目录）")
+    parser.add_argument("--testcases", default="test/generated_unit/test_cases.json",
+                        help="test_cases.json 基线路径")
+    parser.add_argument("--mode", default="incremental",
+                        choices=["full", "incremental"], help="模式")
+    parser.add_argument("--only", nargs="*", default=None,
+                        help="限定只跑指定测试文件")
+    parser.add_argument("--failures-path", default=None,
+                        help="failures.json 输出路径（默认 <debug-dir>/failures.json）")
+    parser.add_argument("--update-baseline", default=None,
+                        help="[已弃用] 请使用 scan_repo.py --output 直接写基线")
+    parser.add_argument("--init-helpers", action="store_true",
+                        help="初始化 helpers 到测试目录")
     args = parser.parse_args()
+
+    # 弃用提示
+    if args.update_baseline:
+        print(
+            "警告：--update-baseline 已弃用。scanner 现在直接写入基线，"
+            "请改用：python scan_repo.py <repo_root> --output "
+            f"{args.testcases}", file=sys.stderr,
+        )
 
     # 初始化 helpers
     if args.init_helpers:
@@ -1664,8 +1691,12 @@ def main():
     failure_blocks = extract_failure_blocks(test_results.get("stdout", ""))
     error_blocks = extract_error_blocks(test_results.get("stdout", ""))
 
-    # 写入 failures.json
-    failures_path = Path(args.failures_path) if args.failures_path else test_dir / "failures.json"
+    # 写入 failures.json（调试产物，默认走 debug_dir）
+    debug_dir = Path(args.debug_dir)
+    if args.failures_path:
+        failures_path = Path(args.failures_path)
+    else:
+        failures_path = debug_dir / "failures.json"
     has_failures = any(r["outcome"] in ("failed", "error") for r in test_results["results"])
     if has_failures:
         write_failures_json(
@@ -1677,15 +1708,19 @@ def main():
         )
         print(f"失败详情已写入：{failures_path}")
 
-    # 收集覆盖率数据
+    # 收集覆盖率数据（coverage.json / coverage.info 写入 debug_dir）
     coverage_data = None
     source_dirs = testcases.get("source_dirs", ["."])
     if has_python and tool_status.get("pytest_cov"):
         print("收集 Python 覆盖率...")
-        coverage_data = collect_python_coverage(str(test_dir), source_dirs, coverage_config)
+        coverage_data = collect_python_coverage(
+            str(test_dir), source_dirs, coverage_config, debug_dir=debug_dir,
+        )
     elif has_cpp and tool_status.get("gcov") and tool_status.get("lcov"):
         print("收集 C++ 覆盖率...")
-        coverage_data = collect_cpp_coverage("build", source_dirs, coverage_config)
+        coverage_data = collect_cpp_coverage(
+            "build", source_dirs, coverage_config, debug_dir=debug_dir,
+        )
 
     # Dead code 检测
     dead_code = []

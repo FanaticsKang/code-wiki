@@ -36,9 +36,15 @@
 | 缓存 | `__pycache__/`, `.tox/`, `.pytest_cache/`, `.mypy_cache/` 等各语言缓存目录 |
 | 构建产物 | `build/`, `dist/`, `*.egg-info/`, `cmake-build-*/` 等 |
 | 已生成代码 | `test/generated_unit/`（自身）、`*_generated.*` |
+| 调试产物 | `.test/generated_unit/`（`.` 开头自动被"隐藏目录"规则排除） |
 | 文档 | `docs/` |
 | 工具/配置 | `.claude/`, `.git/`, `.github/`, `scripts/` |
 | 第三方 | `third_party/`, `vendor/` |
+
+`.test/generated_unit/` 是技能的调试目录，存放 `coverage.json`、`failures.json`、
+`scan_result.json`（可选）、lcov 原始数据等中间产物。它和工作目录 `test/generated_unit/`
+对称命名，靠 `.` 前缀触发 scanner 的"隐藏目录跳过"逻辑（见 `scan_repo.py`
+的 `should_skip_dir`）。建议用户把 `.test/` 加入 `.gitignore`。
 
 各语言可能有额外的排除规则（如 Python 的私有模块、C++ 的系统头文件等），
 见对应语言参考文档。

@@ -160,6 +160,59 @@
 - `coverage_config` 为可选字段，缺失时使用默认阈值（语句 70%、函数 70%、分支 60%）
 - `tool_status` 由环境预检自动写入，不应手动修改
 
+---
+
+## 字段所有权
+
+基线文件是 scanner / 环境预检 / Claude / 用户 共同维护的单一数据源。
+各字段的**写入责任人**如下，违反此约束可能导致 merge 时数据丢失：
+
+### 顶层字段所有权
+
+| 字段 | 写入者 | 覆盖策略 |
+|------|--------|----------|
+| `version` | scanner | scanner 每次覆盖写入当前版本常量 |
+| `generated_at` | scanner | 每次 scanner 运行时刷新 |
+| `mode_last_run` | scanner | 写入 `--mode` 参数值 |
+| `source_dirs` | scanner | scanner 覆盖（本次扫描参数） |
+| `languages` | scanner | scanner 覆盖 |
+| `test_frameworks` | scanner | scanner 覆盖 |
+| `summary` | scanner | scanner 覆盖（扫描后重算） |
+| `coverage_config` | **用户**（手动编辑） | scanner 仅在字段不存在时写默认值，**存在时保留** |
+| `tool_status` | `run_and_report.py`（环境预检） | scanner **完全不触碰**，保留现有值 |
+| `files` | scanner（元数据）+ Claude（cases） | 字段级 merge，详见下节 |
+
+### files.*.functions.* 字段所有权
+
+| 字段 | 写入者 | 覆盖策略 |
+|------|--------|----------|
+| `func_md5` | scanner | 每次重算 |
+| `line_range` | scanner | 每次覆盖 |
+| `signature` | scanner | 每次覆盖 |
+| `is_async` / `class_name` | scanner | 每次覆盖 |
+| `dimensions` | scanner | 每次覆盖（基于 AST 特征重判） |
+| `features` | scanner | 每次覆盖 |
+| `mocks_needed` | scanner | 每次覆盖 |
+| `cases` | **Claude** | **函数 MD5 未变则保留，变更/新增则置空等 Claude 补** |
+
+### Merge 行为（scanner `--output` 模式）
+
+- **文件 MD5 未变** → 完整保留该文件所有函数的 scanner 字段和 cases
+  （scanner 元数据理论上也没变，此处为稳妥起见保留 existing）
+- **文件 MD5 变，某函数 MD5 未变** → 保留该函数的 `cases`，scanner 字段用新值
+- **函数 MD5 变或新增** → scanner 字段用新值，`cases` 置 `[]` 等 Claude 补
+- **函数从源码删除** → 该函数整条记录从基线移除
+- **文件从源码删除** → 整个文件条目从基线移除
+
+### 错误场景的防御
+
+- 如果 `test_cases.json` 被手工编辑得结构损坏（JSON 解析失败），scanner 会
+  发出警告并按全量模式处理，这会**丢失所有 cases**。
+  **因此用户手动编辑 `coverage_config` 时应保持 JSON 合法**。
+- scanner 不会主动备份旧基线；建议用户把 `test/generated_unit/` 纳入版本控制。
+
+---
+
 ### coverage_config
 
 | 字段 | 类型 | 默认值 | 说明 |

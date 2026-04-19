@@ -157,69 +157,70 @@ argument-hint: "init | generate | run | auto"
 1. **解析参数**：`--mode`（默认 incremental）、`--source`（默认全仓库）。
 2. **检查基线**：读取 `test/generated_unit/test_cases.json`。
    - 不存在或解析失败 → 提示"未检测到基线，自动退化为全量模式"，切换 `full`。
-3. **扫描源码**：
-   - 应用排除规则 + `--source` 限定范围。排除规则见
-     [`references/scanning.md`](references/scanning.md)。
-   - 自动识别语言和测试框架（同上）。
-   - 解析每个源文件的函数/方法签名和行为。各语言的扫描规则和过滤条件见
-     `references/` 下的语言参考文档。
-4. **计算哈希**：对每个文件和每个函数分别计算 MD5。
-5. **对比基线**（增量模式）：
-   - 文件 MD5 相同 → 跳过整个文件。
-   - 文件 MD5 变化但函数 MD5 未变 → 跳过该函数。
-   - 函数 MD5 变化或新增 → 标记为需要重新生成。
-   - 基线中存在但扫描未发现的函数 → 标记为删除。
-6. **分析函数行为**：对需要重新生成的函数做特征分析，判定适用的测试维度。
-   维度定义见 [`references/dimensions.md`](references/dimensions.md)，
-   各语言的特征检测规则见 `references/` 下的语言参考文档。
-7. **写入基线文件**：
-   - scanner 的标准输出是 JSON，必须保存到两个位置：
-     - `test/generated_unit/scan_result.json`（scanner 原始输出）
-     - `test/generated_unit/test_cases.json`（基线文件）
-   - 增量模式下，merge 变更到现有 `test_cases.json`。
-   - **确保 `test_cases.json` 始终存在**：如果 run 或 generate 阶段找不到
-     `test_cases.json`，应先检查 `scan_result.json` 并自动提升为基线。
-   - 只存元数据（签名、MD5、维度、测试 case 描述），不存测试代码。
-     基线文件结构见 [`references/test-cases-schema.md`](references/test-cases-schema.md)。
+3. **扫描源码并直写基线**：运行 `scan_repo.py`（见 [辅助脚本](#辅助脚本) 章节的
+   用法），scanner 一条命令内完成扫描 + 字段级 merge。Claude 不干预。
 
-大仓库策略：如果扫描到超过 30 个源文件，考虑按文件分批处理（Claude 自行决定
-是否拆分），避免单次分析过载。
+   scanner 的 merge 规则要点：
+   - 新增 / 变更函数：写 scanner 元数据，`cases` 置空等 Claude 补
+   - 未变更函数（MD5 相同）：**完整保留**旧 `cases`
+   - `coverage_config`：用户编辑优先保留，首次运行写默认值
+   - `tool_status`：scanner 不触碰（归环境预检管理）
+
+   扫描规则（排除路径、存根过滤）见
+   [`references/scanning.md`](references/scanning.md) 和各语言参考文档；
+   字段所有权完整定义见
+   [`references/test-cases-schema.md`](references/test-cases-schema.md)。
+
+4. **Claude 补齐 `cases` 字段**：读取刚写入的 `test_cases.json`，对每个
+   `cases == []` 的函数（即新增或变更的函数），根据 `dimensions` 字段和
+   [`references/dimensions.md`](references/dimensions.md) 的策略，补充
+   测试用例描述元数据（id / type / dimension / description），写回原文件。
+   未变更函数（`cases` 非空）**不动**。
+
+大仓库策略：若扫描到超过 30 个 `cases` 待补的函数，Claude 按文件分批处理，
+避免单次分析过载。
+
+调试副本（通常不做）：若怀疑 scanner 行为异常需要排查，可把 scanner stdout
+重定向到 `.test/generated_unit/scan_result.json`——具体命令见
+[辅助脚本](#辅助脚本) 章节。
 
 ### `generate` 命令
 
-1. **读取 `test_cases.json`**（如果不存在，自动从 `scan_result.json` 提升）。
+1. **读取 `test_cases.json`**。基线不存在 → 提示先运行 `init`。
 2. **生成共享工具文件**（如果不存在或技能版本升级）。各语言的辅助文件
    （Python 的 `_helpers.py`、C++ 的 `_helpers.hpp`）见对应语言参考文档。
-3. **为每个文件生成测试**：
-   - 计算输出路径（镜像源码目录结构）。
-   - 按 `test_cases.json` 中的 case 描述，生成对应的测试函数。
-   - 加上 AUTO-GENERATED 文件头注释。
-4. **生成测试代码时的具体要求**：
-   - 正确设置模块/include 搜索路径（视项目结构和语言而定）。
-   - 每个测试函数有清晰的说明，描述测试目的。
-   - 浮点断言用近似比较。
-   - 边界测试用参数化方式批量运行。
-   - **严禁使用框架的 skip 机制**：必须读取源码分析参数，构造真实输入或 mock。
-   - **先读取源码再生成**：对每个函数，先读取其源码理解参数用途，再构造测试输入。
-   - 生成前先读取对应语言的参考文档获取数据构造策略和测试模板。
+3. **批量生成测试骨架**：运行 `batch_generate.py`（见 [辅助脚本](#辅助脚本)
+   章节的用法），按 `test_cases.json` 中的 `cases` 描述生成测试函数骨架，
+   镜像源码目录结构。
+4. **Claude 精化测试代码**（脚本只生成骨架，真实可运行的测试由 Claude 补全）：
+   - 正确设置模块/include 搜索路径（视项目结构和语言而定）
+   - 每个测试函数有清晰的说明，描述测试目的
+   - 浮点断言用近似比较
+   - 边界测试用参数化方式批量运行
+   - **严禁使用框架的 skip 机制**：必须读取源码分析参数，构造真实输入或 mock
+   - **先读取源码再生成**：对每个函数，先读取其源码理解参数用途，再构造测试输入
+   - 生成前先读取对应语言的参考文档获取数据构造策略和测试模板
 
 ### `run` 命令
+
+运行 `run_and_report.py`（见 [辅助脚本](#辅助脚本) 章节的用法）。
+脚本会依次完成：
 
 1. **执行测试框架**：增量模式下只跑受影响的测试文件。各语言的执行命令见
    对应语言参考文档。
 2. **收集覆盖率数据**：读取 `tool_status` 确认工具可用性，按语言执行覆盖率收集，
-   与阈值对比标记未达标。详细规则见
-   [`references/coverage.md`](references/coverage.md)，具体命令见对应语言参考文档。
+   与阈值对比标记未达标。原始数据（`coverage.json` / `coverage.info`）写入
+   调试目录；详细规则见 [`references/coverage.md`](references/coverage.md)。
 3. **Dead code 检测**：读取 `tool_status` 确认工具可用性，按语言执行静态分析，
    与覆盖率 0% 的函数交叉验证。详细规则见
    [`references/coverage.md`](references/coverage.md)。
-4. **失败处理**：
-   - 生成代码问题（断言写错、mock 不对）→ 修正测试代码，重跑。
-   - 疑似源码 bug → 不修改源码，记入报告。
-   - **skip 用例视为测试代码问题**：所有 skip 必须修复（构造真实输入替换 skip）。
-   - 最多重试 5 轮，仍失败则报告。
-5. **写入 `report.md`**，包含测试结果、覆盖率报告、dead code 检测结果、skip
-   数量和原因。报告模板见 [`references/report-format.md`](references/report-format.md)。
+4. **失败详情**：测试失败时写入 `.test/generated_unit/failures.json`，
+   供 Claude 定位和修复。
+5. **失败处理**：按 [核心原则 #2](#2-失败处理分析原因分类处理) 的分类处理，
+   最多重试 5 轮，仍失败则在报告中如实记录。
+6. **写入 `report.md`**（工作目录，用户最终看到的文件），包含测试结果、覆盖率
+   报告、dead code 检测结果、skip 数量和原因。报告模板见
+   [`references/report-format.md`](references/report-format.md)。
 
 ### `auto` 命令
 
@@ -229,50 +230,59 @@ argument-hint: "init | generate | run | auto"
 
 ## 输出目录结构
 
-所有生成物在 `test/generated_unit/` 下，镜像源码目录结构。
+技能产出分两个目录：
 
-```
-test/generated_unit/
-├── test_cases.json              # 基线文件（元数据 + MD5，不含测试代码）
-├── report.md                    # 测试报告
-├── core/
-│   ├── test_parser.py           # Python 测试（对应 Python 源码）
-│   └── test_calculator.cpp      # C++ 测试（对应 C++ 源码）
-├── utils/
-│   └── test_format.py
-└── api/
-    └── test_handlers.py
-```
+- **工作目录** `test/generated_unit/` — 用户看到的最终产物：基线
+  `test_cases.json`、测试代码、`report.md`、测试辅助文件
+- **调试目录** `.test/generated_unit/` — Claude 内部的中间产物：
+  `coverage.json`、`failures.json`、lcov 原始数据等
 
-混合语言仓库中，不同语言的测试文件共存于同一目录结构下。
-各语言有自己的辅助文件（如 Python 的 `_helpers.py`、C++ 的 `_helpers.hpp`）。
+`.` 前缀使调试目录自动被扫描规则和常见工具（git、编辑器）忽略。
+**建议把 `.test/` 加入 `.gitignore`**。
 
-**命名规则**：源码 `src/<path>/<n>.<ext>` → 测试 `test/generated_unit/<path>/test_<n>.<ext>`。
-每个测试文件顶部加注释：
-
-```
-AUTO-GENERATED by unit-test-gen skill. DO NOT EDIT.
-Source: src/core/parser.py
-Regenerate with: /unit-test-gen auto
-```
+完整目录树、文件分工表、命名规则、测试文件头注释模板见
+[`references/output-structure.md`](references/output-structure.md)。
 
 ---
 
 ## 辅助脚本
 
-`scripts/` 下的脚本是 Claude 的工具，使用前应先阅读其代码并按需调整：
+`scripts/` 下的脚本是 Claude 的工具。使用前应先阅读其代码并按需调整。
 
-- **`scan_repo.py`** — 扫描仓库，输出函数列表和 MD5。支持多种语言。
-  用法：`python scripts/scan_repo.py <repo_root> [--source core,utils] [--language python|cpp]`
+- **`scan_repo.py`** — 扫描仓库，直写/合并 `test_cases.json` 基线。
+  ```
+  # 工作流模式（字段级 merge 写入基线）
+  python scripts/scan_repo.py <repo_root> \
+      --output test/generated_unit/test_cases.json \
+      --mode <full|incremental> [--source <dirs>]
+
+  # 调试模式（stdout，用于排障）
+  python scripts/scan_repo.py <repo_root> > .test/generated_unit/scan_result.json
+  ```
 
 - **`analyze_function.py`** — 对单个函数做特征分析，输出适用维度。
-  用法：`python scripts/analyze_function.py <source_file> --function <n> [--language python|cpp]`
+  Claude 在 `init` 补 `cases` 时，若需要单独钻一个函数的细节，可以用它。
+  ```
+  python scripts/analyze_function.py <source_file> --function <name> \
+      [--class <ClassName>] [--language python|cpp]
+  ```
 
-- **`batch_generate.py`** — 批量生成测试代码。支持多种语言。
-  用法：`python scripts/batch_generate.py --test-cases test_cases.json [--language python|cpp]`
+- **`batch_generate.py`** — 批量生成测试骨架。读 `test_cases.json` 的 `cases`
+  描述，生成对应的测试函数框架（Claude 之后精化）。
+  ```
+  python scripts/batch_generate.py --baseline test/generated_unit/test_cases.json
+  ```
 
-- **`run_and_report.py`** — 执行测试并生成 markdown 报告。支持多种测试框架。
-  用法：`python scripts/run_and_report.py --output report.md [--language python|cpp]`
+- **`run_and_report.py`** — 执行测试并生成 markdown 报告。调试产物
+  （`failures.json`、`coverage.json` 等）写入 `--debug-dir`。
+  ```
+  python scripts/run_and_report.py \
+      --test-dir test/generated_unit/ \
+      --debug-dir .test/generated_unit/ \
+      --testcases test/generated_unit/test_cases.json \
+      --output test/generated_unit/report.md \
+      --mode <full|incremental>
+  ```
 
 ---
 
@@ -285,5 +295,6 @@ Regenerate with: /unit-test-gen auto
 | [`references/dimensions.md`](references/dimensions.md) | 六个测试维度的定义、触发条件、通用测试策略 |
 | [`references/coverage.md`](references/coverage.md) | 覆盖率配置、三种指标、阈值判定、dead code 通用策略 |
 | [`references/scanning.md`](references/scanning.md) | 语言识别规则、扫描排除路径 |
+| [`references/output-structure.md`](references/output-structure.md) | 工作目录 / 调试目录完整结构、命名规则、文件头注释 |
 | [`references/test-cases-schema.md`](references/test-cases-schema.md) | `test_cases.json` 字段结构和设计约束 |
 | [`references/report-format.md`](references/report-format.md) | `report.md` 模板和字段说明 |

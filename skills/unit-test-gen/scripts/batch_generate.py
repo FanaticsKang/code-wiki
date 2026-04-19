@@ -1,22 +1,40 @@
 #!/usr/bin/env python3
 """
-batch_generate.py — 基于 scan_result.json 批量生成测试文件（Python pytest + C++ gtest）。
+batch_generate.py — 基于 test_cases.json 批量生成测试文件（Python pytest + C++ gtest）。
 
-根据扫描结果的函数元数据（签名、维度、异步标志等）生成功能性 + 边界测试。
+根据基线文件的函数元数据（签名、维度、异步标志等）生成功能性 + 边界测试。
 自动从函数签名提取参数名并构造合理输入，不使用 skip 机制。
 
 生成的测试作为初始骨架，后续由 LLM 精化。
+
+用法：
+    python batch_generate.py                                     # 默认读 test/generated_unit/test_cases.json
+    python batch_generate.py --baseline path/to/test_cases.json  # 指定基线路径
 """
 
+import argparse
 import json
 import re
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[4]  # scripts/ → unit-test-gen/ → skills/ → .claude/ → repo root
-TEST_DIR = REPO_ROOT / "test" / "generated_unit"
-
 CPP_EXTENSIONS = {".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh", ".hxx"}
+
+# 全局：run-time 时由 main() 从 --baseline 路径推导
+# 默认值仅作为 fallback，实际使用应经过 main() 初始化
+REPO_ROOT: Path = Path.cwd()
+TEST_DIR: Path = REPO_ROOT / "test" / "generated_unit"
+
+
+def _init_paths(baseline_path: Path) -> None:
+    """根据 baseline 的路径推导 REPO_ROOT 和 TEST_DIR。
+
+    baseline 预期位于 <repo_root>/test/generated_unit/test_cases.json。
+    """
+    global REPO_ROOT, TEST_DIR
+    TEST_DIR = baseline_path.parent.resolve()
+    # test/generated_unit/ 上两级 = repo root
+    REPO_ROOT = TEST_DIR.parents[1] if len(TEST_DIR.parents) >= 2 else TEST_DIR.parent
 
 # =============================================================================
 # 通用工具函数
@@ -766,23 +784,51 @@ def generate_cpp_file(source: str, file_data: dict) -> str:
 
 
 def main():
-    scan_path = TEST_DIR / "scan_result.json"
-    if not scan_path.is_file():
-        print(f"错误：{scan_path} 不存在", file=sys.stderr)
+    parser = argparse.ArgumentParser(
+        description="基于 test_cases.json 批量生成测试文件骨架"
+    )
+    parser.add_argument(
+        "--baseline",
+        default=None,
+        help="基线文件路径（默认 <cwd>/test/generated_unit/test_cases.json）",
+    )
+    args = parser.parse_args()
+
+    if args.baseline is None:
+        baseline_path = Path.cwd() / "test" / "generated_unit" / "test_cases.json"
+    else:
+        baseline_path = Path(args.baseline).resolve()
+
+    if not baseline_path.is_file():
+        print(f"错误：基线文件 {baseline_path} 不存在。"
+              f"请先运行 scan_repo.py --output {baseline_path} 生成基线。",
+              file=sys.stderr)
         sys.exit(1)
 
-    with open(scan_path, "r", encoding="utf-8") as f:
+    # 根据 baseline 路径推导 REPO_ROOT / TEST_DIR（影响 _test_path 的输出位置）
+    _init_paths(baseline_path)
+
+    with open(baseline_path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
     files = data.get("files", {})
     total = len(files)
     generated_py = 0
     generated_cpp = 0
+    empty_cases_files = []
 
     for source, file_data in sorted(files.items()):
         functions = file_data.get("functions", {})
         if not functions:
             continue
+
+        # 警告：若函数的 cases 全空,说明 Claude 尚未补齐用例描述,
+        # 生成的测试骨架可能覆盖不足。
+        has_any_cases = any(
+            f.get("cases") for f in functions.values()
+        )
+        if not has_any_cases:
+            empty_cases_files.append(source)
 
         lang = _detect_language(source)
         test_path = _test_path(source)
@@ -801,7 +847,20 @@ def main():
         if done % 20 == 0:
             print(f"  已生成 {done}/{total} ...")
 
-    print(f"完成：生成 {generated_py} 个 Python 测试 + {generated_cpp} 个 C++ 测试 = {generated_py + generated_cpp} 个文件")
+    print(f"完成：生成 {generated_py} 个 Python 测试 + {generated_cpp} 个 C++ 测试 "
+          f"= {generated_py + generated_cpp} 个文件")
+
+    if empty_cases_files:
+        print(
+            f"\n提示：{len(empty_cases_files)} 个文件的所有函数 cases 均为空，"
+            f"建议先让 Claude 补 cases 再重新 generate：",
+            file=sys.stderr,
+        )
+        for f in empty_cases_files[:5]:
+            print(f"  - {f}", file=sys.stderr)
+        if len(empty_cases_files) > 5:
+            print(f"  ... 另有 {len(empty_cases_files) - 5} 个文件",
+                  file=sys.stderr)
 
 
 if __name__ == "__main__":
