@@ -17,7 +17,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # ========== 核心 Skill 列表（默认安装） ==========
-CORE_SKILLS=("code-wiki" "module-test-gen" "unit-test-gen")
+CORE_SKILLS=("code-wiki" "module-test-gen" "unit-test-gen" "unit-test-gen-init")
 
 # ========== skill 过滤函数 ==========
 is_installable() {
@@ -206,6 +206,7 @@ echo "可用命令："
 echo "  /code-wiki init | scan | query | lint"
 echo "  /module-test-gen init | generate | run"
 echo "  /unit-test-gen init | generate | run | auto"
+echo "  /unit-test-gen-init"
 if [ "$FULL_MODE" = true ]; then
     echo "  /paper-code-deepdive"
 fi

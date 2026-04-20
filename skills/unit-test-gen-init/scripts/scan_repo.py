@@ -1,29 +1,13 @@
 #!/usr/bin/env python3
 """
-scan_repo.py — 扫描代码仓库，提取所有可测试函数（支持 Python 和 C++）。
+scan_repo.py — 纯扫描器：扫描代码仓库，提取所有可测试函数（支持 Python 和 C++）。
 
-输出 JSON 结构包含每个文件和函数的元信息（签名、MD5、AST 特征、适用维度）。
-Claude 读取此输出后补充每个函数的 `cases` 描述（测试用例元数据）。
+输出包含每个函数的完整 AST 特征（features）、维度、mock 建议等原始扫描结果。
+基线生成（test_cases.json）由 build_baseline.py 负责。
 
-两种用法：
-
-1. 调试模式（stdout，默认）：
-    python scan_repo.py <repo_root> [--source core,utils]
-    python scan_repo.py <repo_root> --baseline test/generated_unit/test_cases.json
-    → 输出完整 JSON 到 stdout，适合人工 / Claude 检视
-
-2. 工作流模式（直写基线文件，merge 语义）：
-    python scan_repo.py <repo_root> --output test/generated_unit/test_cases.json
-    python scan_repo.py <repo_root> --output test/generated_unit/test_cases.json --mode full
-    → 直接写入/合并基线，字段级 merge：
-      - 保留用户的 `coverage_config`（仅在不存在时写入默认值）
-      - 不触碰 `tool_status`（归 run_and_report.py 负责）
-      - 保留未变更函数的 `cases`（LLM 产物，scanner 不管）
-      - 增量模式（默认）：`--mode incremental`，只覆盖变更函数的元数据
-      - 全量模式：`--mode full`，对所有函数重写元数据但仍保留 cases
-
-调试产物（如扫描原始结果的保留副本）建议另存到 .test/generated_unit/scan_result.json：
-    python scan_repo.py <repo_root> > .test/generated_unit/scan_result.json
+用法：
+    python scan_repo.py <repo_root> --output .test/scan_result.json
+    python scan_repo.py <repo_root> --source core,utils --output .test/scan_result.json
 """
 
 import argparse
@@ -35,21 +19,8 @@ import sys
 from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
-# 基线格式版本。改变字段结构时递增。
-BASELINE_VERSION = "1.0"
-
-# coverage_config 默认值（仅在基线文件中不存在 coverage_config 时写入）
-DEFAULT_COVERAGE_CONFIG = {
-    "statement_threshold": 90,
-    "function_threshold": 100,
-    "branch_threshold": 90,
-    "exclude_dirs": [],
-    "dead_code_min_confidence": 80,
-}
-
-# C++ 解析（可选依赖，仅扫描 C++ 文件时需要）
+# C++ 解析（可选依赖）
 try:
     import tree_sitter_cpp as tscpp
     from tree_sitter import Language, Parser
@@ -88,22 +59,18 @@ def should_skip_dir(path: Path, _repo_root: Path) -> bool:
 
 
 def should_skip_file(path: Path) -> bool:
-    """判断文件是否应跳过（支持 Python 和 C++）。"""
+    """判断文件是否应跳过。"""
     name = path.name
     ext = path.suffix.lower()
 
-    # 只处理已知扩展名
     if ext not in PY_EXTENSIONS and ext not in CPP_EXTENSIONS:
         return True
 
-    # Python 私有模块（但 __init__.py 保留）
     if ext == ".py":
         if name.startswith("_") and name != "__init__.py":
             return True
         if name.endswith("_generated.py"):
             return True
-
-    # C++ 头文件保护：跳过纯声明头文件（在解析时判断，此处先放行）
 
     return False
 
@@ -282,14 +249,18 @@ class PythonAnalyzer(LanguageAnalyzer):
             source = filepath.read_text(encoding="utf-8", errors="replace")
             tree = ast.parse(source, filename=str(filepath))
         except (SyntaxError, UnicodeDecodeError) as e:
-            return {"error": str(e), "functions": {}}
+            return {"error": str(e), "functions": {}, "total_funcs_found": 0}
 
         source_lines = source.splitlines()
         file_md5 = md5_text(source)
         rel_path = str(filepath.relative_to(repo_root))
         functions = {}
+        total_funcs_found = 0
 
         def _process_func(func_node, class_name=None):
+            nonlocal total_funcs_found
+            total_funcs_found += 1
+
             if _is_stub(func_node):
                 return
             if _is_property_setter(func_node):
@@ -336,7 +307,12 @@ class PythonAnalyzer(LanguageAnalyzer):
                     if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                         _process_func(child, class_name=node.name)
 
-        return {"file_md5": file_md5, "path": rel_path, "functions": functions}
+        return {
+            "file_md5": file_md5,
+            "path": rel_path,
+            "functions": functions,
+            "total_funcs_found": total_funcs_found,
+        }
 
     @staticmethod
     def decide_dimensions(features: dict, has_float: bool = False) -> list[str]:
@@ -394,7 +370,7 @@ class PythonAnalyzer(LanguageAnalyzer):
         return mocks
 
 
-# Python 私有辅助函数
+# Python 辅助函数
 
 def _is_stub(func_node) -> bool:
     body = func_node.body
@@ -491,7 +467,6 @@ def _get_source_segment(source_lines: list[str], node) -> str:
 # C++ 分析器
 # ---------------------------------------------------------------------------
 
-# tree-sitter C++ 节点类型常量
 _CPP_FUNC_DEF = "function_definition"
 _CPP_CLASS_SPEC = "class_specifier"
 _CPP_STRUCT_SPEC = "struct_specifier"
@@ -510,13 +485,10 @@ _CPP_DELETE_EXPR = "delete_expression"
 _CPP_TYPE_DESC = "type_descriptor"
 _CPP_FUNC_DECL = "function_declarator"
 
-# declarator 包装类型:真正的 function_declarator 可能被层层包裹。
-# 这几种节点的子节点里都包含可能进一步嵌套的 declarator,需要递归剥开
-# 才能找到实际的 function_declarator。
 _CPP_DECLARATOR_WRAPPERS = {
-    "pointer_declarator",      # int* foo()
-    "reference_declarator",    # std::string& foo()
-    "parenthesized_declarator",  # (foo)() 罕见但合法
+    "pointer_declarator",
+    "reference_declarator",
+    "parenthesized_declarator",
 }
 
 
@@ -529,8 +501,8 @@ class CppAnalyzer(LanguageAnalyzer):
                 "C++ 扫描需要 tree-sitter 依赖。"
                 "请安装: pip install tree-sitter tree-sitter-cpp"
             )
-        self._language = Language(tscpp.language())  # type: ignore[misc]
-        self._parser = Parser(self._language)  # type: ignore[abstract]
+        self._language = Language(tscpp.language())
+        self._parser = Parser(self._language)
 
     def extract_functions(self, filepath: Path, repo_root: Path) -> dict:
         source = filepath.read_text(encoding="utf-8", errors="replace")
@@ -542,111 +514,92 @@ class CppAnalyzer(LanguageAnalyzer):
         root = tree.root_node
 
         functions = {}
-        self._walk_node(root, source_bytes, filepath, functions)
+        total_funcs_found = [0]
+        self._walk_node(root, source_bytes, functions, total_funcs_found)
 
-        return {"file_md5": file_md5, "path": rel_path, "functions": functions}
+        return {
+            "file_md5": file_md5,
+            "path": rel_path,
+            "functions": functions,
+            "total_funcs_found": total_funcs_found[0],
+        }
 
     def _walk_node(self, node, source_bytes: bytes,
-                   filepath: Path, functions: dict,
+                   functions: dict, total_funcs_found: list,
                    namespace: str = "", class_name: str | None = None):
-        """递归遍历 tree-sitter AST，提取函数定义。"""
         for child in node.children:
-            # 命名空间
             if child.type == "namespace_definition":
                 ns_name = self._node_text(child.child_by_field_name("name"), source_bytes)
                 new_ns = f"{namespace}::{ns_name}" if namespace else ns_name
-                self._walk_node(child, source_bytes, filepath, functions, new_ns, class_name)
+                self._walk_node(child, source_bytes, functions, total_funcs_found, new_ns, class_name)
                 continue
 
-            # 类/结构体:class_name 只保存裸类名,namespace 由调用者统一拼接
             if child.type in ("class_specifier", "struct_specifier"):
                 cn_node = child.child_by_field_name("name")
                 if cn_node is None:
-                    continue  # 匿名类/结构体
+                    continue
                 cn = self._node_text(cn_node, source_bytes)
-                self._walk_node(child, source_bytes, filepath, functions, namespace, cn)
+                self._walk_node(child, source_bytes, functions, total_funcs_found, namespace, cn)
                 continue
 
-            # 模板函数/模板类方法
             if child.type == _CPP_TEMPLATE_DECL:
                 for inner in child.children:
                     if inner.type == _CPP_FUNC_DEF:
                         self._process_function(
-                            inner, source_bytes, filepath, functions,
+                            inner, source_bytes, functions, total_funcs_found,
                             namespace, class_name, is_template=True)
                     elif inner.type in (_CPP_CLASS_SPEC, _CPP_STRUCT_SPEC):
                         cn_node = inner.child_by_field_name("name")
                         if cn_node is None:
                             continue
                         cn = self._node_text(cn_node, source_bytes)
-                        self._walk_node(inner, source_bytes, filepath, functions,
+                        self._walk_node(inner, source_bytes, functions, total_funcs_found,
                                         namespace, cn)
                 continue
 
-            # 普通函数定义
             if child.type == _CPP_FUNC_DEF:
                 self._process_function(
-                    child, source_bytes, filepath, functions,
+                    child, source_bytes, functions, total_funcs_found,
                     namespace, class_name)
 
-            # 递归子节点（处理嵌套结构）
             if child.children:
-                self._walk_node(child, source_bytes, filepath, functions,
+                self._walk_node(child, source_bytes, functions, total_funcs_found,
                                 namespace, class_name)
 
     def _process_function(self, func_node, source_bytes: bytes,
-                          _filepath: Path, functions: dict,
+                          functions: dict, total_funcs_found: list,
                           namespace: str, class_name: str | None,
                           is_template: bool = False):
-        """处理单个函数定义节点。
+        total_funcs_found[0] += 1
 
-        注意:tree-sitter 的 function_declarator 经常被 pointer_declarator /
-        reference_declarator 包裹(如 `int* foo()`, `std::string& bar()`),
-        所以不能直接用 _find_child 找,必须先剥掉这些包装节点。
-        """
-        # 剥掉 pointer/reference/parenthesized 包装,找到真正的 function_declarator
         declarator = self._unwrap_to_function_declarator(func_node, source_bytes)
         if not declarator:
             return
 
-        # 从 declarator 提取函数名 + 可能的类名(类外定义时类名藏在
-        # qualified_identifier 里,如 `Foo::bar` 或 `Foo<T>::bar`)
         func_name, qualified_class = self._extract_name_and_qualifier(
             declarator, source_bytes
         )
         if not func_name:
             return
 
-        # 过滤:main 函数
         if func_name == "main":
             return
-
-        # 过滤:析构函数
         if func_name.startswith("~"):
             return
 
-        # 过滤:operator= 自动生成版本等 —— 通过 decl_text 判定 default/delete
         decl_text = self._node_text(declarator, source_bytes)
         if "= default" in decl_text or "= delete" in decl_text:
             return
 
-        # 类外定义:declarator 里的 qualified 优先于外部传入的 class_name
-        # (类外定义时 class_name 参数为 None,因为不在 class_specifier 遍历下)
         effective_class = qualified_class or class_name
 
-        # 获取函数体(compound_statement 是 function_definition 的直接子节点,
-        # 不会被 declarator 包装影响)
         body_node = self._find_child(func_node, "compound_statement")
         if not body_node:
-            return  # 纯声明,无定义
+            return
 
-        # 提取签名
         signature = self._build_signature(func_node, declarator, source_bytes)
-
-        # 特征分析
         features = self._analyze_features(body_node, source_bytes, func_name)
 
-        # 构建完整限定名
         parts = []
         if namespace:
             parts.append(namespace)
@@ -655,7 +608,6 @@ class CppAnalyzer(LanguageAnalyzer):
         parts.append(func_name)
         qualified_name = "::".join(parts)
 
-        # 维度和 mock
         dims = self.decide_dimensions(features)
         mocks = self.decide_mocks(features, effective_class)
 
@@ -684,7 +636,6 @@ class CppAnalyzer(LanguageAnalyzer):
 
     def _analyze_features(self, body_node, source_bytes: bytes,
                           func_name: str) -> dict:
-        """遍历函数体 tree-sitter AST，检测特征。"""
         features = {
             "has_numeric_op": False,
             "has_float_type": False,
@@ -715,66 +666,51 @@ class CppAnalyzer(LanguageAnalyzer):
         }
 
         self._detect_recursive(body_node, source_bytes, func_name, features)
-
         return features
 
     def _detect_recursive(self, node, source_bytes: bytes,
                           func_name: str, features: dict):
-        """递归遍历节点，检测所有特征。"""
         if node is None:
             return
 
-        # 检查当前节点类型
         if node.type == _CPP_TRY_STMT:
             features["has_try"] = True
             features["is_pure"] = False
-
         elif node.type == _CPP_THROW_STMT:
             features["has_throw"] = True
-
         elif node.type == _CPP_CALL_EXPR:
             self._check_call_features(node, source_bytes, features, func_name)
-
         elif node.type == _CPP_BIN_EXPR:
             op = self._node_text(node.child_by_field_name("operator"), source_bytes)
             if op in ("+", "-", "*", "/", "%"):
                 features["has_numeric_op"] = True
-
         elif node.type == _CPP_SUBSCRIPT:
             features["has_index_access"] = True
-
         elif node.type in (_CPP_FOR_STMT, _CPP_WHILE_STMT,
                            _CPP_DO_STMT, _CPP_RANGE_FOR):
             features["has_iteration"] = True
-
         elif node.type == _CPP_NEW_EXPR:
             features["has_new_delete"] = True
             features["is_pure"] = False
-
         elif node.type == _CPP_DELETE_EXPR:
             features["has_new_delete"] = True
-
         elif node.type == "pointer_expression":
             features["has_raw_pointer"] = True
 
-        # 递归子节点
         for child in node.children:
             self._detect_recursive(child, source_bytes, func_name, features)
 
     def _check_call_features(self, call_node, source_bytes: bytes,
                              features: dict, func_name: str):
-        """分析函数调用表达式的特征。"""
         func_node = call_node.child_by_field_name("function")
         if not func_node:
             return
 
         call_text = self._node_text(func_node, source_bytes)
 
-        # 递归检测
         if call_text == func_name:
             features["has_recursion"] = True
 
-        # STL 数学
         if any(fn in call_text for fn in (
             "std::abs", "std::sqrt", "std::pow", "std::sin",
             "std::cos", "std::tan", "std::log", "std::exp",
@@ -782,7 +718,6 @@ class CppAnalyzer(LanguageAnalyzer):
         )):
             features["uses_stl_math"] = True
 
-        # STL 算法
         if any(fn in call_text for fn in (
             "std::sort", "std::stable_sort", "std::partial_sort",
             "std::find", "std::find_if", "std::transform",
@@ -792,7 +727,6 @@ class CppAnalyzer(LanguageAnalyzer):
             if "sort" in call_text:
                 features["has_sort"] = True
 
-        # 文件 IO
         if any(fn in call_text for fn in (
             "std::fstream", "std::ifstream", "std::ofstream",
             "fopen", "fclose", "fread", "fwrite",
@@ -800,62 +734,52 @@ class CppAnalyzer(LanguageAnalyzer):
             features["has_file_io"] = True
             features["is_pure"] = False
 
-        # 网络
         if any(fn in call_text for fn in (
             "boost::asio", "curl_", "socket", "connect", "send", "recv",
         )):
             features["has_network"] = True
             features["is_pure"] = False
 
-        # 智能指针
         if any(fn in call_text for fn in (
             "std::make_unique", "std::make_shared",
             "std::unique_ptr", "std::shared_ptr", "std::weak_ptr",
         )):
             features["uses_smart_ptr"] = True
 
-        # 子进程
         if any(fn in call_text for fn in ("system", "popen", "exec")):
             features["has_subprocess"] = True
             features["is_pure"] = False
 
-        # printf 系列
         if any(fn in call_text for fn in (
             "printf", "sprintf", "snprintf", "fprintf",
         )):
             features["has_printf"] = True
 
-        # SQL
         if any(fn in call_text for fn in (
             "sqlite3_", "mysql_", "PQ", "sqlite::",
         )):
             features["has_sql_ops"] = True
             features["is_pure"] = False
 
-        # 缓冲区操作
         if any(fn in call_text for fn in (
             "memcpy", "strcpy", "strcat", "memmove", "strncpy",
         )):
             features["has_buffer_op"] = True
 
-        # 字符串方法
         if any(fn in call_text for fn in (
             ".substr", ".find", ".replace", ".c_str",
             ".append", ".insert", ".erase", ".compare",
         )):
             features["has_str_ops"] = True
 
-        # 容器增长
         if any(fn in call_text for fn in (
             "push_back", "emplace_back", "insert",
         )):
             features["has_container_growth"] = True
 
-        # 移动语义
         if "std::move" in call_text:
             features["has_move_semantics"] = True
 
-        # 通过检查参数类型推断浮点
         if any(t in call_text for t in ("float", "double")):
             features["has_float_type"] = True
 
@@ -925,18 +849,6 @@ class CppAnalyzer(LanguageAnalyzer):
         return None
 
     def _unwrap_to_function_declarator(self, func_node, _source_bytes: bytes):
-        """在 function_definition 的子节点里找到真正的 function_declarator,
-        递归剥掉 pointer_declarator / reference_declarator / parenthesized_declarator
-        等包装节点。
-
-        函数定义 AST 典型形状:
-          function_definition
-            ├─ <return_type>  (primitive_type / qualified_identifier / ...)
-            ├─ <declarator>   ← 这里可能是 pointer_declarator 套 function_declarator
-            └─ compound_statement
-
-        所以只在 func_node 的直接子节点里找 declarator 层,再从那层往内递归剥。
-        """
         for child in func_node.children:
             if child.type == _CPP_FUNC_DECL:
                 return child
@@ -947,21 +859,16 @@ class CppAnalyzer(LanguageAnalyzer):
         return None
 
     def _peel_declarator_wrappers(self, node):
-        """剥掉 pointer_declarator 等包装,返回里面的 function_declarator。
-        找不到返回 None。
-        """
         if node is None:
             return None
         if node.type == _CPP_FUNC_DECL:
             return node
         if node.type in _CPP_DECLARATOR_WRAPPERS:
-            # 这些包装节点里必有一个 declarator 子节点(通过字段或直接遍历)
             inner = node.child_by_field_name("declarator")
             if inner is not None:
                 peeled = self._peel_declarator_wrappers(inner)
                 if peeled is not None:
                     return peeled
-            # 兜底:某些 tree-sitter 版本不提供 field,遍历所有子节点
             for child in node.children:
                 peeled = self._peel_declarator_wrappers(child)
                 if peeled is not None:
@@ -969,68 +876,34 @@ class CppAnalyzer(LanguageAnalyzer):
         return None
 
     def _extract_name_and_qualifier(self, declarator, source_bytes: bytes):
-        """从 function_declarator 中同时提取函数名和(若为类外定义的)类名限定符。
-
-        返回 (func_name, qualified_class):
-          - 自由函数 `foo()`:               ("foo", None)
-          - 类内方法 `foo()`:               ("foo", None)  # 类名由外部遍历提供
-          - 类外定义 `Foo::bar()`:          ("bar", "Foo")
-          - 模板类外 `Foo<T>::bar()`:       ("bar", "Foo")
-          - 命名空间类外 `ns::Foo::bar()`:  ("bar", "ns::Foo")
-          - operator `operator+()`:        ("operator+", None)
-          - 嵌套 declarator(函数指针等):  递归下钻
-
-        当函数名解析失败(极罕见情况)时返回 ("", None)。
-        """
         for child in declarator.children:
-            # 普通自由函数 / 类方法:identifier 或 field_identifier
             if child.type in ("identifier", "field_identifier"):
                 return self._node_text(child, source_bytes), None
-            # operator 重载
             if child.type == "operator_name":
                 return self._node_text(child, source_bytes), None
-            # destructor 理论上前面已被 ~ 开头过滤掉,但保留完整性
             if child.type == "destructor_name":
                 return self._node_text(child, source_bytes), None
 
-            # 类外定义:Foo::bar 或 ns::Foo::bar 或 Foo<T>::bar
             if child.type == "qualified_identifier":
                 return self._parse_qualified_identifier(child, source_bytes)
 
-            # 模板函数名:foo<int>
             if child.type == "template_function":
-                # 提取 template_function 里面的 identifier 作为函数名
                 for sub in child.children:
                     if sub.type in ("identifier", "field_identifier"):
                         return self._node_text(sub, source_bytes), None
                 return self._node_text(child, source_bytes), None
 
-            # 嵌套 declarator(比如函数指针包一层):递归
             if child.type == _CPP_FUNC_DECL:
                 return self._extract_name_and_qualifier(child, source_bytes)
 
         return "", None
 
     def _parse_qualified_identifier(self, qid_node, source_bytes: bytes):
-        """解析 qualified_identifier,分离末尾的函数名和前面的类/命名空间限定。
-
-        AST 结构(tree-sitter-cpp):
-          qualified_identifier
-            ├─ <scope>        namespace_identifier / type_identifier / template_type
-            ├─ ::
-            └─ <name>         identifier / field_identifier / 另一个 qualified_identifier / template_function / operator_name
-
-        实现策略:
-          - 递归找到最右端的那个叶子节点作为函数名
-          - 前面所有 scope 拼成 qualified_class,template_type 只取模板名(`Foo<T>` → `Foo`)
-        """
-        # 收集从左到右的 scope 片段(不包含最末端的函数名)
         scope_parts: list[str] = []
         final_name = ""
 
         def walk(node):
             nonlocal final_name
-            # 找到 name 字段(最右端)和 scope 字段(左侧)
             scope = node.child_by_field_name("scope")
             name = node.child_by_field_name("name")
 
@@ -1040,10 +913,8 @@ class CppAnalyzer(LanguageAnalyzer):
                 elif scope.type == "type_identifier":
                     scope_parts.append(self._node_text(scope, source_bytes))
                 elif scope.type == "template_type":
-                    # Foo<T> → 只取 Foo,丢弃模板参数
                     tid = scope.child_by_field_name("name")
                     if tid is None:
-                        # 兜底:找第一个 type_identifier
                         for c in scope.children:
                             if c.type == "type_identifier":
                                 tid = c
@@ -1051,7 +922,7 @@ class CppAnalyzer(LanguageAnalyzer):
                     if tid is not None:
                         scope_parts.append(self._node_text(tid, source_bytes))
                 elif scope.type == "qualified_identifier":
-                    walk(scope)  # 继续左侧递归
+                    walk(scope)
 
             if name is not None:
                 if name.type == "qualified_identifier":
@@ -1068,10 +939,8 @@ class CppAnalyzer(LanguageAnalyzer):
                     else:
                         final_name = self._node_text(name, source_bytes)
                 else:
-                    # 兜底
                     final_name = self._node_text(name, source_bytes)
 
-        # 如果 child_by_field_name 不可用,回退到字符串切分
         has_fields = (
             qid_node.child_by_field_name("name") is not None
             or qid_node.child_by_field_name("scope") is not None
@@ -1080,7 +949,6 @@ class CppAnalyzer(LanguageAnalyzer):
             walk(qid_node)
         else:
             text = self._node_text(qid_node, source_bytes)
-            # 剥模板参数:Foo<T, U> → Foo;要小心嵌套 <>,但这里简化处理
             parts = self._split_qualified_by_scope(text)
             if parts:
                 final_name = parts[-1]
@@ -1091,10 +959,6 @@ class CppAnalyzer(LanguageAnalyzer):
 
     @staticmethod
     def _split_qualified_by_scope(text: str) -> list[str]:
-        """按 :: 分割 qualified name,同时剥掉每段的模板参数。
-        用于 child_by_field_name 不可用时的兜底。
-        """
-        # 先去掉所有 <...>(考虑嵌套)
         cleaned = []
         depth = 0
         for ch in text:
@@ -1107,28 +971,8 @@ class CppAnalyzer(LanguageAnalyzer):
         clean_text = "".join(cleaned)
         return [p for p in clean_text.split("::") if p]
 
-    def _extract_func_name(self, declarator, source_bytes: bytes) -> str:
-        """从 function_declarator 提取函数名(兼容旧接口,仅返回名字)。"""
-        name, _ = self._extract_name_and_qualifier(declarator, source_bytes)
-        return name
-
     def _build_signature(self, func_node, declarator,
                          source_bytes: bytes) -> str:
-        """构建函数签名字符串。
-
-        对于 `int* Foo::bar() const`,AST 形状:
-          function_definition
-            ├─ primitive_type  "int"          ← 返回类型
-            ├─ pointer_declarator "* Foo::bar()"
-            │    └─ function_declarator "Foo::bar()"
-            └─ compound_statement
-
-        需要:
-          1. 返回类型支持多种节点类型(primitive_type / qualified_identifier /
-             placeholder_type_specifier / type_identifier / sized_type_specifier)
-          2. 指针/引用修饰符在外层 declarator 上,要一并拼进签名
-        """
-        # 返回类型候选节点
         return_type_types = {
             "primitive_type", "qualified_identifier", "type_identifier",
             "placeholder_type_specifier", "sized_type_specifier",
@@ -1140,7 +984,6 @@ class CppAnalyzer(LanguageAnalyzer):
                 ret_type = self._node_text(child, source_bytes)
                 break
 
-        # 外层 declarator 文本(可能是 pointer_declarator 等),含修饰符
         outer_declarator_text = ""
         for child in func_node.children:
             if child.type == _CPP_FUNC_DECL:
@@ -1150,7 +993,6 @@ class CppAnalyzer(LanguageAnalyzer):
                 outer_declarator_text = self._node_text(child, source_bytes)
                 break
 
-        # 兜底:用真正的 function_declarator 文本
         if not outer_declarator_text:
             outer_declarator_text = self._node_text(declarator, source_bytes)
 
@@ -1162,12 +1004,11 @@ class CppAnalyzer(LanguageAnalyzer):
 # ---------------------------------------------------------------------------
 
 def get_analyzer(ext: str) -> LanguageAnalyzer | None:
-    """根据文件扩展名返回对应的语言分析器。"""
     if ext in PY_EXTENSIONS:
         return PythonAnalyzer()
     if ext in CPP_EXTENSIONS:
         if not _TS_AVAILABLE:
-            return None  # 跳过 C++ 文件（缺少依赖）
+            return None
         return CppAnalyzer()
     return None
 
@@ -1177,7 +1018,6 @@ def get_analyzer(ext: str) -> LanguageAnalyzer | None:
 # ---------------------------------------------------------------------------
 
 def detect_language_and_framework(repo_root: Path) -> dict:
-    """检测语言和测试框架。"""
     result = {"languages": [], "test_frameworks": {}}
 
     has_py = any(repo_root.rglob("*.py"))
@@ -1203,7 +1043,6 @@ def detect_language_and_framework(repo_root: Path) -> dict:
 # ---------------------------------------------------------------------------
 
 def walk_sources(repo_root: Path, source_dirs: list[str] | None) -> list[Path]:
-    """遍历源码目录，返回所有应扫描的源文件（Python + C++）。"""
     if source_dirs:
         roots = [repo_root / d for d in source_dirs]
     else:
@@ -1234,92 +1073,10 @@ def walk_sources(repo_root: Path, source_dirs: list[str] | None) -> list[Path]:
 
 
 # ---------------------------------------------------------------------------
-# 基线对比
-# ---------------------------------------------------------------------------
-
-def compare_with_baseline(current: dict, baseline_path: Path | None) -> dict:
-    """与 test_cases.json 基线对比，标注变更。"""
-    if not baseline_path or not baseline_path.is_file():
-        return {
-            "is_incremental": False,
-            "changed_files": list(current["files"].keys()),
-            "new_files": list(current["files"].keys()),
-            "removed_files": [],
-            "changed_functions": {},
-            "unchanged_functions": {},
-        }
-
-    try:
-        with open(baseline_path, "r", encoding="utf-8") as f:
-            baseline = json.load(f)
-    except Exception:
-        return {
-            "is_incremental": False,
-            "changed_files": list(current["files"].keys()),
-            "new_files": list(current["files"].keys()),
-            "removed_files": [],
-            "changed_functions": {},
-            "unchanged_functions": {},
-        }
-
-    baseline_files = baseline.get("files", {})
-    current_files = current["files"]
-
-    changed_files = []
-    new_files = []
-    removed_files = []
-    changed_functions = {}
-    unchanged_functions = {}
-
-    for fpath, finfo in current_files.items():
-        if fpath not in baseline_files:
-            new_files.append(fpath)
-            changed_files.append(fpath)
-            changed_functions[fpath] = list(finfo["functions"].keys())
-            continue
-
-        baseline_finfo = baseline_files[fpath]
-        if baseline_finfo.get("file_md5") == finfo["file_md5"]:
-            unchanged_functions[fpath] = list(finfo["functions"].keys())
-            continue
-
-        changed_files.append(fpath)
-        baseline_funcs = baseline_finfo.get("functions", {})
-        cur_funcs = finfo["functions"]
-        changed_functions[fpath] = []
-        unchanged_functions[fpath] = []
-        for fkey, fdata in cur_funcs.items():
-            if fkey not in baseline_funcs:
-                changed_functions[fpath].append(fkey)
-            elif baseline_funcs[fkey].get("func_md5") != fdata["func_md5"]:
-                changed_functions[fpath].append(fkey)
-            else:
-                unchanged_functions[fpath].append(fkey)
-
-    for fpath in baseline_files:
-        if fpath not in current_files:
-            removed_files.append(fpath)
-
-    return {
-        "is_incremental": True,
-        "changed_files": changed_files,
-        "new_files": new_files,
-        "removed_files": removed_files,
-        "changed_functions": changed_functions,
-        "unchanged_functions": unchanged_functions,
-    }
-
-
-# ---------------------------------------------------------------------------
 # 测试路径计算
 # ---------------------------------------------------------------------------
 
 def _compute_test_path(source_rel_path: str) -> str | None:
-    """根据源码相对路径计算测试文件路径。
-
-    规则：source <path>/<name>.<ext> → test/generated_unit/<path>/test_<name>.<ext>
-    例如：core/dag/parser.py → test/generated_unit/core/dag/test_parser.py
-    """
     p = Path(source_rel_path)
     name = p.name
     if not name.startswith("test_"):
@@ -1328,192 +1085,14 @@ def _compute_test_path(source_rel_path: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# 基线构建与 merge
+# 原子写入
 # ---------------------------------------------------------------------------
 
-# 函数级字段：这些字段由 scanner 负责写入/更新（语法/AST 层面的事实）
-_SCANNER_OWNED_FUNC_FIELDS = (
-    "func_md5", "line_range", "signature", "is_async",
-    "class_name", "dimensions", "features", "mocks_needed",
-)
-
-# 函数级字段：这些字段由 Claude/LLM 负责，scanner 不动（语义层面的产物）
-_LLM_OWNED_FUNC_FIELDS = ("cases",)
-
-
-def _func_metadata_from_scan(scan_func: dict) -> dict:
-    """从 scanner 原始输出提取函数级元数据字段（剔除 scanner 自己用的临时字段）。
-
-    scanner 内部有 `name`、`decorators`、`has_float_type` 等字段，这些是调试/
-    中间字段，不进基线。进基线的只有 _SCANNER_OWNED_FUNC_FIELDS。
-    """
-    result = {}
-    for key in _SCANNER_OWNED_FUNC_FIELDS:
-        if key in scan_func:
-            result[key] = scan_func[key]
-    return result
-
-
-def build_baseline(scan_result: dict, mode: str) -> dict:
-    """将 scanner 的纯扫描产物（scan_result）组织成完整基线结构。
-
-    这只是把字段重新组织,不做 merge；merge 留给 merge_into_baseline。
-
-    参数：
-      scan_result: scanner 内部构造的扫描结果（含 languages、files 等）
-      mode: "full" 或 "incremental"，写入 mode_last_run 字段
-
-    返回：基线结构的字典（不含 cases，cases 由 Claude 后补）
-    """
-    baseline_files = {}
-    for src_path, file_info in scan_result["files"].items():
-        func_out = {}
-        for func_key, func_data in file_info.get("functions", {}).items():
-            func_out[func_key] = _func_metadata_from_scan(func_data)
-            # 新扫描的函数 cases 为空数组，等 Claude 补
-            func_out[func_key]["cases"] = []
-
-        baseline_files[src_path] = {
-            "file_md5": file_info["file_md5"],
-            "test_path": file_info.get("test_path", ""),
-            "functions": func_out,
-        }
-
-    total_cases = sum(
-        len(f.get("cases", []))
-        for fi in baseline_files.values()
-        for f in fi["functions"].values()
-    )
-
-    return {
-        "version": BASELINE_VERSION,
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "languages": scan_result["languages"],
-        "test_frameworks": scan_result["test_frameworks"],
-        "source_dirs": scan_result["source_dirs"],
-        "mode_last_run": mode,
-        "summary": {
-            **scan_result.get("summary", {}),
-            "total_cases": total_cases,
-        },
-        "coverage_config": dict(DEFAULT_COVERAGE_CONFIG),
-        # tool_status 由 run_and_report.py 的环境预检写入，scanner 不初始化
-        "files": baseline_files,
-    }
-
-
-def merge_into_baseline(existing: dict, fresh: dict, mode: str,
-                        incremental_info: dict) -> dict:
-    """以字段级别将新扫描结果 merge 进已有基线。
-
-    合并规则：
-    - 顶层：scanner 负责的字段（version/generated_at/mode_last_run/languages/
-      test_frameworks/source_dirs/summary）用 fresh 覆盖。
-    - coverage_config: 若 existing 有则保留用户编辑值；否则用 fresh（DEFAULT）。
-    - tool_status: 若 existing 有则完整保留；没有则不写入（留给 run_and_report）。
-    - files: 字段级 merge
-      - 新增文件：直接从 fresh 取（cases 为空待补）
-      - 删除文件：从 existing 中移除
-      - 文件 MD5 相同（unchanged）：完全保留 existing，连 cases 一起
-      - 文件 MD5 不同但某函数 MD5 未变：保留该函数的 cases，元数据用 fresh
-      - 函数 MD5 变化或新增：元数据用 fresh，cases 置空等 Claude 补
-      - 函数被删除：从 existing 中移除
-
-    全量模式（mode=full）下，仍然按 MD5 判断 cases 能否保留（避免无谓丢失）；
-    mode 只影响 mode_last_run 的字面值。
-
-    参数：
-      existing: 旧 test_cases.json 的内容（可能为空 dict）
-      fresh: 本次 build_baseline 构造的新基线（不含 cases）
-      mode: "full" / "incremental"
-      incremental_info: compare_with_baseline 的输出，用于确定未变文件
-
-    返回：合并后的基线字典
-    """
-    existing_files = existing.get("files", {})
-    fresh_files = fresh["files"]
-    merged_files = {}
-
-    unchanged_files = set()
-    if incremental_info.get("is_incremental"):
-        # 未变更文件：不出现在 changed_files 里的都算未变
-        changed = set(incremental_info.get("changed_files", []))
-        for fp in existing_files:
-            if fp not in changed and fp in fresh_files:
-                unchanged_files.add(fp)
-
-    for src_path, fresh_finfo in fresh_files.items():
-        if src_path in unchanged_files:
-            # 整个文件未变：完全保留 existing（包括所有 cases）
-            merged_files[src_path] = existing_files[src_path]
-            # 但仍然同步 test_path（可能技能版本升级修改了路径规则）
-            merged_files[src_path]["test_path"] = fresh_finfo.get(
-                "test_path", existing_files[src_path].get("test_path", "")
-            )
-            continue
-
-        # 文件变化或新增：逐函数合并
-        existing_funcs = existing_files.get(src_path, {}).get("functions", {})
-        fresh_funcs = fresh_finfo["functions"]
-        merged_funcs = {}
-
-        for func_key, fresh_func in fresh_funcs.items():
-            existing_func = existing_funcs.get(func_key, {})
-            merged = dict(fresh_func)  # scanner 字段 + 空 cases
-
-            if (existing_func
-                    and existing_func.get("func_md5") == fresh_func.get("func_md5")
-                    and existing_func.get("cases")):
-                # 函数未变，保留旧 cases
-                merged["cases"] = existing_func["cases"]
-            # 否则 cases 就是 fresh 里的空数组 []
-
-            merged_funcs[func_key] = merged
-
-        merged_files[src_path] = {
-            "file_md5": fresh_finfo["file_md5"],
-            "test_path": fresh_finfo.get("test_path", ""),
-            "functions": merged_funcs,
-        }
-    # 不在 fresh 中的文件 = 被删除，自然不会进 merged_files
-
-    # 重新计算 total_cases
-    total_cases = sum(
-        len(f.get("cases", []))
-        for fi in merged_files.values()
-        for f in fi["functions"].values()
-    )
-
-    result = {
-        "version": BASELINE_VERSION,
-        "generated_at": fresh["generated_at"],
-        "languages": fresh["languages"],
-        "test_frameworks": fresh["test_frameworks"],
-        "source_dirs": fresh["source_dirs"],
-        "mode_last_run": mode,
-        "summary": {**fresh["summary"], "total_cases": total_cases},
-        "files": merged_files,
-    }
-
-    # coverage_config: 用户编辑优先
-    if "coverage_config" in existing:
-        result["coverage_config"] = existing["coverage_config"]
-    else:
-        result["coverage_config"] = dict(DEFAULT_COVERAGE_CONFIG)
-
-    # tool_status: 若已存在则保留（run_and_report 会在 run 阶段再次更新）
-    if "tool_status" in existing:
-        result["tool_status"] = existing["tool_status"]
-
-    return result
-
-
-def write_baseline_file(baseline: dict, output_path: Path) -> None:
-    """原子写入基线文件（先写临时文件再 rename，避免中断导致半写状态）。"""
+def _write_json_atomic(data: dict, output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = output_path.with_suffix(output_path.suffix + ".tmp")
     tmp.write_text(
-        json.dumps(baseline, indent=2, ensure_ascii=False),
+        json.dumps(data, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
     tmp.replace(output_path)
@@ -1525,20 +1104,13 @@ def write_baseline_file(baseline: dict, output_path: Path) -> None:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="扫描仓库提取可测试函数（支持 Python 和 C++）",
+        description="扫描仓库提取可测试函数（纯扫描器，输出原始结果）",
     )
     parser.add_argument("repo_root", help="仓库根目录")
     parser.add_argument("--source", default=None,
                         help="限定扫描的目录，逗号分隔")
-    parser.add_argument("--baseline", default=None,
-                        help="基线 test_cases.json 路径（用于增量对比）。"
-                             "与 --output 同时使用时，--output 自动作为 --baseline。")
-    parser.add_argument("--output", default=None,
-                        help="直写/合并基线文件路径（工作流模式）。"
-                             "不指定则输出 JSON 到 stdout（调试模式）。")
-    parser.add_argument("--mode", default="incremental",
-                        choices=["full", "incremental"],
-                        help="扫描模式，写入基线的 mode_last_run 字段（默认 incremental）")
+    parser.add_argument("--output", default=".test/scan_result.json",
+                        help="输出路径（默认 .test/scan_result.json）")
     args = parser.parse_args()
 
     repo_root = Path(args.repo_root).resolve()
@@ -1550,15 +1122,6 @@ def main():
     if args.source:
         source_dirs = [s.strip() for s in args.source.split(",") if s.strip()]
 
-    # 如果指定了 --output 而未显式提供 --baseline，默认把 output 当作基线来增量对比
-    baseline_path = None
-    if args.baseline:
-        baseline_path = Path(args.baseline)
-    elif args.output:
-        candidate = Path(args.output)
-        if candidate.is_file():
-            baseline_path = candidate
-
     lang_info = detect_language_and_framework(repo_root)
 
     if "cpp" in lang_info["languages"] and not _TS_AVAILABLE:
@@ -1569,11 +1132,17 @@ def main():
     files = walk_sources(repo_root, source_dirs)
 
     result = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
         "languages": lang_info["languages"],
         "test_frameworks": lang_info["test_frameworks"],
         "source_dirs": source_dirs or ["."],
         "files": {},
     }
+
+    total_source_files = len(files)
+    scanned_files = 0
+    total_funcs_found = 0
+    extracted_funcs = 0
 
     for fpath in files:
         ext = fpath.suffix.lower()
@@ -1582,67 +1151,44 @@ def main():
             continue
 
         finfo = analyzer.extract_functions(fpath, repo_root)
+        found = finfo.get("total_funcs_found", len(finfo.get("functions", {})))
+        extracted = len(finfo.get("functions", {}))
+
+        total_funcs_found += found
+        extracted_funcs += extracted
+
         if finfo.get("functions"):
             rel = str(fpath.relative_to(repo_root))
-            # 计算测试文件路径：source path/ext → test/generated_unit/path/test_name.ext
             test_path = _compute_test_path(rel)
             if test_path:
                 finfo["test_path"] = test_path
             result["files"][rel] = finfo
+            scanned_files += 1
 
-    total_functions = sum(
-        len(f["functions"]) for f in result["files"].values()
-    )
-    result["summary"] = {
-        "total_files": len(result["files"]),
-        "total_functions": total_functions,
+    skipped_files = total_source_files - scanned_files
+    skipped_funcs = total_funcs_found - extracted_funcs
+
+    result["scan_stats"] = {
+        "total_source_files": total_source_files,
+        "scanned_files": scanned_files,
+        "skipped_files": skipped_files,
+        "total_functions_found": total_funcs_found,
+        "functions_extracted": extracted_funcs,
+        "functions_skipped": skipped_funcs,
     }
 
-    incremental_info = compare_with_baseline(result, baseline_path)
-    result["incremental"] = incremental_info
+    # 写入文件
+    output_path = Path(args.output)
+    _write_json_atomic(result, output_path)
 
-    # 工作流模式：直写/合并基线文件
-    if args.output:
-        output_path = Path(args.output)
-        fresh_baseline = build_baseline(result, mode=args.mode)
-
-        existing = {}
-        if baseline_path and baseline_path.is_file():
-            try:
-                with open(baseline_path, "r", encoding="utf-8") as f:
-                    existing = json.load(f)
-            except Exception as e:
-                print(f"警告: 基线文件 {baseline_path} 无法解析（{e}），"
-                      f"按全量处理", file=sys.stderr)
-                existing = {}
-
-        merged = merge_into_baseline(
-            existing, fresh_baseline,
-            mode=args.mode,
-            incremental_info=incremental_info,
-        )
-        write_baseline_file(merged, output_path)
-
-        # stderr 给简要摘要（便于 Claude 和用户看）
-        print(
-            f"基线已写入: {output_path}\n"
-            f"  文件数: {merged['summary'].get('total_files', 0)} | "
-            f"函数数: {merged['summary'].get('total_functions', 0)} | "
-            f"用例数: {merged['summary'].get('total_cases', 0)}",
-            file=sys.stderr,
-        )
-        if incremental_info.get("is_incremental"):
-            changed = len(incremental_info.get("changed_files", []))
-            new = len(incremental_info.get("new_files", []))
-            removed = len(incremental_info.get("removed_files", []))
-            print(
-                f"  增量: 变更 {changed} 文件 | 新增 {new} | 删除 {removed}",
-                file=sys.stderr,
-            )
-        return
-
-    # 调试模式：stdout 输出原始扫描结果
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+    print(
+        f"扫描结果已写入: {output_path}\n"
+        f"  文件扫描: {scanned_files}/{total_source_files} "
+        f"({round(scanned_files / total_source_files * 100, 1) if total_source_files else 0}%)\n"
+        f"  函数提取: {extracted_funcs}/{total_funcs_found} "
+        f"({round(extracted_funcs / total_funcs_found * 100, 1) if total_funcs_found else 0}%)",
+        file=sys.stderr,
+    )
 
 
 if __name__ == "__main__":

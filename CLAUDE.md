@@ -9,9 +9,10 @@ code-wiki 是一个 Claude Code skills + agents 分发包，包含以下 skill�
 核心（默认安装）：
 - **code-wiki**：为任意代码仓库增量构建和维护中文 wiki
 - **module-test-gen**：半自动化的模块级测试生成工具
+- **unit-test-gen**：单元测试生成工具，支持 Python（pytest）和 C++（Google Test）
+- **unit-test-gen-init**：单测生成流水线的初始化阶段，扫描代码仓库并生成/更新 `test_cases.json` 基线文件
 
 可选（`install.sh --full` 安装）：
-- **unit-test-gen**：单元测试生成工具，支持 Python（pytest）和 C++（Google Test）
 - **paper-code-deepdive**：论文-代码深度对比分析工具（四阶段流水线：定位创新点 → 分析论文材料 → 定位代码实现 → 深度对比出报告）
 
 本仓库本身**不是**最终运行的项目，而是一个安装源：通过 `install.sh`（核心）或 `install.sh --full`（全部）将 skills 和 agents 安装到目标项目的 `.claude/` 目录下。
