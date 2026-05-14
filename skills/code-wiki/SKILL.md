@@ -4,8 +4,8 @@ description: |
   为代码仓库增量构建中文 wiki（./wiki/ 目录），梳理架构、数据流，辅助理解和重构。
   触发词：理解代码仓库、梳理架构、生成文档/wiki、读懂代码、分析项目结构。
   即使未提及"wiki"，只要意图是系统性理解代码仓库或为重构做准备，都应触发。
-  命令：init, scan, query, lint。
-argument-hint: "init | scan | query | lint"
+  命令：init, scan, deep, query, lint。
+argument-hint: "init | scan | deep | query | lint"
 allowed-tools:
   - Bash
   - Read
@@ -26,17 +26,19 @@ allowed-tools:
 | `init`, `初始化`, `开始建 wiki`, `帮我分析这个仓库`, `理解这个代码仓库`, `梳理项目架构`, `给这个项目生成文档` | init |
 | `init <路径>`(如 `init core/` 或 `init core/dag/executor.py`) | init,附带 `--folder` 或 `--file`(详见下方) |
 | `scan`, `扫描`, `扫一下`, `继续扫`, `扫剩余文件`, `增量扫描` | scan |
+| `deep`, `深度`, `深入`, `详细分析 xxx`, `深挖 xxx`, `深入看 xxx 的数据流`, `详细分析 xxx 的算法` | deep |
 | `query`, `查询`, `问问`, `xxx 是怎么工作的`, `xxx 和 yyy 是什么关系` | query |
 | `lint`, `健康检查`, `检查 wiki`, `检查一下 wiki 的一致性`, `lint 一下` | lint |
 
-**歧义消解：** 如果没有提供子命令且无法判断意图，`wiki/` 目录不存在时默认走 `init`，已存在时默认走 `query`。
+**歧义消解：** 如果没有提供子命令且无法判断意图，`wiki/` 目录不存在时默认走 `init`，已存在时默认走 `query`。如果用户输入包含"深入"/"详细"/"深挖"等词且 `wiki/` 已存在，走 `deep`。
 
-**路径参数提取：** 如果 `$ARGUMENTS` 中包含以 `/` 分隔的路径片段，提取为 `--folder` 或 `--file` 参数。路径含 `.` 和扩展名映射为 `--file`，否则映射为 `--folder`。这些参数只用于 init 阶段，传给 `scan.py init`。
+**路径参数提取：** 如果 `$ARGUMENTS` 中包含以 `/` 分隔的路径片段，提取为 `--folder` 或 `--file` 参数。路径含 `.` 和扩展名映射为 `--file`，否则映射为 `--folder`。这些参数只用于 init 和 deep 阶段（init 传给 `scan.py init`，deep 用来确定深度扫描范围）。
 
 确定子命令后，**必须先读取对应的 reference 文件再继续**：
 
 - `init` → 读取 `references/workflow-init.md`
 - `scan` → 读取 `references/workflow-scan.md`
+- `deep` → 读取 `references/workflow-deep.md`
 - `query` → 读取 `references/workflow-query-lint.md`（查询部分）
 - `lint` → 读取 `references/workflow-query-lint.md`（健康检查部分）
 
@@ -73,8 +75,10 @@ allowed-tools:
 │   │   └── <模块名>.md
 │   ├── concepts/        ← 静态结构：数据结构、领域实体、设计模式、术语
 │   │   └── <概念名>.md
-│   └── algorithm/       ← 动态过程：核心算法、数据处理流水线、关键计算逻辑
-│       └── <算法名>.md
+│   ├── algorithm/       ← 动态过程：核心算法、数据处理流水线、关键计算逻辑
+│   │   └── <算法名>.md
+│   └── deep/            ← 深度分析：针对特定主题的算法/数据流纵深剖析
+│       └── <主题名>.md
 └── .code-wiki/          ← 脚本和状态
     ├── scan.py          ← 扫描器脚本
     └── state.json       ← 增量状态（文件哈希、最后处理时间）
@@ -95,12 +99,13 @@ allowed-tools:
 
 ## 工作流总览
 
-整个 skill 有四种操作，对应四种用户意图：
+整个 skill 有五种操作，对应五种用户意图：
 
 1. **init**（初始化）——第一次面对一个仓库：分析仓库概貌、和用户确认扫描范围、搭建 wiki 骨架、生成扫描清单。**不立刻开始扫描文件**，先让用户确认计划。
 2. **scan**（扫描）——**基于 hypothesis.md 驱动的分层阅读**。每批 sub-agent 完成后强制走反思步骤（见 `references/reflection-checklist.md`），更新 hypothesis、检查老页面一致性、决定下一批读什么。这是主力操作。
-3. **query**（查询）——用户针对已建好的 wiki 提问。优先读 `index.md` 和 `architecture.md` 定位，再读具体页面。好答案应该回填到 `concepts/` 或 `refactor.md`。
-4. **lint**（健康检查）——检查 wiki 内部的矛盾、过时内容、孤儿页、缺失的交叉引用、应该但还没建的概念页，并给出补扫建议。
+3. **deep**（深度扫描）——针对用户指定的内容或目录，进行算法和数据流的**深度**扫描。两阶段循环：深度阅读（逐函数展开、数据命名变更、hardcode 分析）→ 串联验证（从头到尾串联，发现遗漏则回退补充）。最终产出保存到 `wiki/deep/`。详见 `references/workflow-deep.md`。
+4. **query**（查询）——用户针对已建好的 wiki 提问。优先读 `index.md` 和 `architecture.md` 定位，再读具体页面。好答案应该回填到 `concepts/` 或 `refactor.md`。
+5. **lint**（健康检查）——检查 wiki 内部的矛盾、过时内容、孤儿页、缺失的交叉引用、应该但还没建的概念页，并给出补扫建议。
 
 详细指南见各 `references/workflow-*.md` 文件，命令解析段已指定了每个子命令对应的文件。**不要凭记忆**——这些文件里有具体的检查项和模板。
 
